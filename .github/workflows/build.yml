@@ -23,11 +23,14 @@ concurrency:
 env:
   ARCH: arm64
   DEFCONFIG: vendor/xiaomi/miatoll_defconfig
-  # Proton Clang 13: self-contained toolchain with Polly + ld.lld + LLVM tools
-  # and aarch64/arm GNU binutils. The 4.14 kbuild's Polly flags are guarded
-  # with cc-option, so newer Clang works too, but this is the period-correct,
-  # known-good toolchain for the tree. Fetched as a codeload tarball.
+  # Proton Clang (13 upstream / 12 on the AICP mirror): self-contained
+  # toolchain with Polly + ld.lld + LLVM tools and aarch64/arm GNU binutils.
+  # The 4.14 kbuild's Polly flags are guarded with cc-option, so both LLVM 12
+  # and 13+ Polly bundles build the tree. Three independent fetch sources are
+  # tried because runner network blips on large binary archives are common.
   PROTON_URL: https://codeload.github.com/kdrag0n/proton-clang/tar.gz/refs/heads/master
+  PROTON_MIRROR_URL: https://codeload.github.com/AICP/prebuilts_clang_host_linux-x86_proton/tar.gz/refs/heads/master
+  PROTON_GIT_URL: https://github.com/kdrag0n/proton-clang.git
 
 jobs:
   build:
@@ -56,27 +59,51 @@ jobs:
 
       - name: Fetch Proton Clang toolchain
         run: |
-          set -euo pipefail
-          # codeload tarball (no git history) is far more reliable than
-          # cloning this large binary-only repository.
+          set -uo pipefail
+          # Everything is tee'd into a log uploaded with the failure
+          # artifacts so the exact failing source/HTTP code is always visible.
+          exec > >(tee toolchain-fetch.log) 2>&1
+          set -x
+          df -h "$HOME" /tmp || true
           mkdir -p "$HOME/proton-clang"
-          url="$PROTON_URL"
           ok=0
-          for attempt in 1 2 3; do
-            echo "==> toolchain download attempt ${attempt}"
-            if curl -fL --retry 4 --retry-all-errors --retry-delay 5 \
-                    --connect-timeout 30 --max-time 1800 \
-                    -o /tmp/proton.tar.gz "$url"; then
-              if tar -xzf /tmp/proton.tar.gz -C "$HOME/proton-clang" --strip-components=1; then
-                ok=1
-                break
-              fi
-            fi
+
+          fetch_tarball() {
+            local name="$1" url="$2"
+            echo "==> [$name] codeload tarball: $url"
             rm -f /tmp/proton.tar.gz
-            sleep 10
-          done
-          [ "$ok" = 1 ] || { echo "::error::Proton Clang download failed after 3 attempts"; exit 1; }
-          test -x "$HOME/proton-clang/bin/clang"
+            curl -fL --retry 3 --retry-all-errors --retry-delay 5 \
+                 --connect-timeout 30 --max-time 1800 \
+                 -w 'http=%{http_code} bytes=%{size_download} time=%{time_total}s\n' \
+                 -o /tmp/proton.tar.gz "$url" || return 1
+            test -s /tmp/proton.tar.gz || return 1
+            tar -xzf /tmp/proton.tar.gz -C "$HOME/proton-clang" --strip-components=1 || return 1
+            rm -f /tmp/proton.tar.gz
+          }
+
+          fetch_git() {
+            local url="$1"
+            echo "==> shallow git fallback: $url"
+            rm -rf /tmp/proton-git
+            git clone --depth=1 --single-branch "$url" /tmp/proton-git || return 1
+            cp -a /tmp/proton-git/. "$HOME/proton-clang/"
+            rm -rf /tmp/proton-git
+          }
+
+          if fetch_tarball upstream "$PROTON_URL"; then
+            ok=1
+          elif fetch_tarball aicp-mirror "$PROTON_MIRROR_URL"; then
+            ok=1
+          elif fetch_git "$PROTON_GIT_URL"; then
+            ok=1
+          fi
+
+          set +x
+          if [ "$ok" != 1 ] || [ ! -x "$HOME/proton-clang/bin/clang" ]; then
+            echo "::error::all Proton Clang sources failed; see toolchain-fetch.log"
+            df -h || true
+            exit 1
+          fi
           echo "$HOME/proton-clang/bin" >> "$GITHUB_PATH"
           clang --version | head -2
           ld.lld --version | head -1
@@ -218,6 +245,7 @@ jobs:
           path: |
             build.log
             package.log
+            toolchain-fetch.log
             out/.config
           if-no-files-found: ignore
           retention-days: 14
