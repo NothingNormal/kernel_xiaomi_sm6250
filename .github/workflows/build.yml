@@ -26,8 +26,8 @@ env:
   # Proton Clang 13: self-contained toolchain with Polly + ld.lld + LLVM tools
   # and aarch64/arm GNU binutils. The 4.14 kbuild's Polly flags are guarded
   # with cc-option, so newer Clang works too, but this is the period-correct,
-  # known-good toolchain for the tree.
-  PROTON_REPO: https://github.com/kdrag0n/proton-clang.git
+  # known-good toolchain for the tree. Fetched as a codeload tarball.
+  PROTON_URL: https://codeload.github.com/kdrag0n/proton-clang/tar.gz/refs/heads/master
 
 jobs:
   build:
@@ -57,7 +57,26 @@ jobs:
       - name: Fetch Proton Clang toolchain
         run: |
           set -euo pipefail
-          git clone --depth=1 "$PROTON_REPO" "$HOME/proton-clang"
+          # codeload tarball (no git history) is far more reliable than
+          # cloning this large binary-only repository.
+          mkdir -p "$HOME/proton-clang"
+          url="$PROTON_URL"
+          ok=0
+          for attempt in 1 2 3; do
+            echo "==> toolchain download attempt ${attempt}"
+            if curl -fL --retry 4 --retry-all-errors --retry-delay 5 \
+                    --connect-timeout 30 --max-time 1800 \
+                    -o /tmp/proton.tar.gz "$url"; then
+              if tar -xzf /tmp/proton.tar.gz -C "$HOME/proton-clang" --strip-components=1; then
+                ok=1
+                break
+              fi
+            fi
+            rm -f /tmp/proton.tar.gz
+            sleep 10
+          done
+          [ "$ok" = 1 ] || { echo "::error::Proton Clang download failed after 3 attempts"; exit 1; }
+          test -x "$HOME/proton-clang/bin/clang"
           echo "$HOME/proton-clang/bin" >> "$GITHUB_PATH"
           clang --version | head -2
           ld.lld --version | head -1
