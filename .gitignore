@@ -129,3 +129,16 @@ kernel/configs/android-*.cfg
 #Ignoring Android.bp link file
 #
 Android.bp
+
+#
+# CI / local kernel build products
+#
+# Keep .github tracked even though the broad ".*" rule above ignores dotfiles.
+!.github/
+out/
+artifacts/
+.ak3-stage/
+toolchains/
+build-local.log
+build.log
+package.log

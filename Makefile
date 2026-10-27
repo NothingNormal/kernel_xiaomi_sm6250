@@ -744,15 +744,22 @@ KBUILD_CFLAG	+= -fwhole-program-vtables
 endif
 
 ifdef CONFIG_LLVM_POLLY
+# Three Polly passes were renamed in LLVM 13:
+#   polly-loopfusion-greedy -> polly-opt-fusion
+#   polly-reschedule        -> polly-opt-simplify-deps
+#   polly-postopts          -> folded into polly-position (no 1:1 flag)
+# cc-option keeps the original flags on period toolchains (LLVM <= 12) and
+# transparently selects the new names on LLVM 13+ (Clang 13/14 and newer),
+# so this tree builds with both the old and the current Polly bundles.
 KBUILD_CFLAGS	+= -mllvm -polly \
 		   -mllvm -polly-run-inliner \
 		   -mllvm -polly-ast-use-context \
 		   -mllvm -polly-detect-keep-going \
 		   -mllvm -polly-invariant-load-hoisting \
 		   -mllvm -polly-vectorizer=stripmine \
-		   -mllvm -polly-loopfusion-greedy=1 \
-		   -mllvm -polly-reschedule=1 \
-		   -mllvm -polly-postopts=1 \
+		   $(call cc-option,-mllvm -polly-loopfusion-greedy=1,-mllvm -polly-opt-fusion=1) \
+		   $(call cc-option,-mllvm -polly-reschedule=1,-mllvm -polly-opt-simplify-deps=1) \
+		   $(call cc-option,-mllvm -polly-postopts=1) \
 		   -mllvm -polly-num-threads=0 \
 		   -mllvm -polly-omp-backend=LLVM \
 		   -mllvm -polly-scheduling=dynamic \

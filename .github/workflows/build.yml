@@ -1,0 +1,218 @@
+# miatoll (SM6250/Atoll) non-GKI 4.14 kernel - MIUI 14 / Android 12 build
+#
+# Produces a recovery-flashable AnyKernel3 ZIP that flashes ONLY the kernel
+# into the existing boot image (stock MIUI ramdisk/DTB/dtbo preserved).
+name: Build miatoll kernel (MIUI 14)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'arena/**'
+    paths-ignore:
+      - '**.md'
+      - 'Documentation/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: miatoll-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARCH: arm64
+  DEFCONFIG: vendor/xiaomi/miatoll_defconfig
+  # Proton Clang 13: self-contained toolchain with Polly + ld.lld + LLVM tools
+  # and aarch64/arm GNU binutils. The 4.14 kbuild's Polly flags are guarded
+  # with cc-option, so newer Clang works too, but this is the period-correct,
+  # known-good toolchain for the tree.
+  PROTON_REPO: https://github.com/kdrag0n/proton-clang.git
+
+jobs:
+  build:
+    name: Compile, verify and package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+
+      - name: Show runner resources
+        run: |
+          echo "::group::Runner"
+          nproc
+          free -h
+          df -h / | tail -1
+          echo "::endgroup::"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison ccache flex git kmod libelf-dev libssl-dev \
+            make python3 rsync zip curl ca-certificates gcc binutils
+
+      - name: Fetch Proton Clang toolchain
+        run: |
+          set -euo pipefail
+          git clone --depth=1 "$PROTON_REPO" "$HOME/proton-clang"
+          echo "$HOME/proton-clang/bin" >> "$GITHUB_PATH"
+          clang --version | head -2
+          ld.lld --version | head -1
+          llvm-ar --version | head -1
+
+      - name: Verify toolchain capabilities (Polly, LLD, IAS)
+        run: |
+          set -euo pipefail
+          echo 'int a(int n){int s=0;for(int i=0;i<n;i++)s+=i;return s;}' > /tmp/polly.c
+          clang -O2 -mllvm -polly -c /tmp/polly.c -o /tmp/polly.o
+          echo "Polly: OK"
+          clang --version | grep -qi clang
+          echo "Clang: OK"
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: miatoll-ccache-${{ github.sha }}
+          restore-keys: |
+            miatoll-ccache-
+
+      - name: Generate and verify MIUI 14 / Android 12 configuration
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/proton-clang/bin:$PATH"
+          export LLVM_IAS=1
+          make O=out ARCH=arm64 "$DEFCONFIG"
+          make O=out ARCH=arm64 olddefconfig
+
+          require() {
+            grep -qx "$1" out/.config || { echo "::error::required config missing: $1"; exit 1; }
+          }
+          require_off() {
+            if grep -qE "^${1}=[ym]" out/.config; then
+              echo "::error::config must stay disabled: $1"; exit 1
+            fi
+          }
+
+          # --- MIUI 14 userspace interfaces (stock-MIUI parity) ---
+          require 'CONFIG_MEMCG=y'
+          require 'CONFIG_MEMCG_SWAP=y'
+          require 'CONFIG_MEMCG_SWAP_ENABLED=y'
+          require 'CONFIG_CGROUP_WRITEBACK=y'
+          require 'CONFIG_MSM_PERFORMANCE=y'      # MIUI perfd fmin/fmax
+          require 'CONFIG_UID_SYS_STATS=y'
+          require 'CONFIG_AUDIT=y'
+          require 'CONFIG_NETLABEL=y'
+          require 'CONFIG_UTS_NS=y'
+
+          # --- Android 12 storage / integrity / container features ---
+          require 'CONFIG_EROFS_FS=y'            # MIUI 14 system partition
+          require 'CONFIG_EROFS_FS_ZIP=y'        # LZ4-compressed EROFS
+          require 'CONFIG_LZ4_DECOMPRESS=y'
+          require 'CONFIG_F2FS_FS=y'
+          require 'CONFIG_FS_VERITY=y'
+          require 'CONFIG_FS_ENCRYPTION=y'
+          require 'CONFIG_OVERLAY_FS=y'
+          require 'CONFIG_INCREMENTAL_FS=y'
+          require 'CONFIG_ANDROID_BINDERFS=y'
+          require 'CONFIG_ANDROID_BINDER_IPC=y'
+          require 'CONFIG_BPF_SYSCALL=y'
+          require 'CONFIG_BPF_JIT=y'
+          require 'CONFIG_SECCOMP=y'
+          require 'CONFIG_ASHMEM=y'
+          require 'CONFIG_ION=y'
+
+          # --- miatoll hardware: touch, fingerprint, media, connectivity ---
+          require 'CONFIG_TOUCHSCREEN_FTS_SPI=y'
+          require 'CONFIG_TOUCHSCREEN_NT36xxx_HOSTDL_SPI=y'
+          require 'CONFIG_FINGERPRINT_FPC1020=y'
+          require 'CONFIG_FINGERPRINT_GF3208=y'
+          require 'CONFIG_QCA_CLD_WLAN=y'
+          require 'CONFIG_ICNSS=y'
+          require 'CONFIG_SPECTRA_CAMERA=y'
+          require 'CONFIG_QCOM_KGSL=y'
+          require 'CONFIG_QSEECOM=y'
+          require 'CONFIG_SND_SOC=y'
+          require 'CONFIG_QPNP_SMB5=y'
+          require 'CONFIG_AW8624_HAPTIC=y'
+
+          # --- codegen / boot ---
+          require 'CONFIG_LTO_CLANG=y'
+          require 'CONFIG_THINLTO=y'
+          require 'CONFIG_LLVM_POLLY=y'
+          require 'CONFIG_BUILD_ARM64_DT_OVERLAY=y'
+          require 'CONFIG_ARCH_ATOLL=y'
+
+          # Module-free build: nothing is shipped as .ko
+          if grep -q '=m$' out/.config; then
+            echo "::error::modules (=m) present but no modules are shipped"
+            grep '=m$' out/.config
+            exit 1
+          fi
+          echo "All required symbols present; module count: 0"
+
+      - name: Build kernel, DTB and DTBO
+        run: |
+          set -euo pipefail
+          export USE_CCACHE=1
+          export CCACHE_DIR="$HOME/.ccache"
+          ccache --max-size=5G || true
+          CLANG_PATH="$HOME/proton-clang" \
+            JOBS="$(nproc)" \
+            bash scripts/build.sh 2>&1 | tee build.log
+
+      - name: Verify build products
+        run: |
+          set -euo pipefail
+          for f in \
+            out/arch/arm64/boot/Image.gz \
+            out/arch/arm64/boot/dtbo.img \
+            out/arch/arm64/boot/dts/qcom/cust-atoll-ab.dtb \
+            out/kernel.release; do
+            test -s "$f" || { echo "::error::missing $f"; exit 1; }
+            echo "ok: $f"
+          done
+          for dev in curtana excalibur gram joyeuse; do
+            f="out/arch/arm64/boot/dts/qcom/${dev}-atoll-ab-idp-overlay.dtbo"
+            test -s "$f" || { echo "::error::missing $f"; exit 1; }
+            echo "ok: $f"
+          done
+          echo "::group::SHA256"
+          sha256sum out/arch/arm64/boot/Image.gz out/arch/arm64/boot/dtbo.img
+          echo "::endgroup::"
+          echo "kernelrelease=$(cat out/kernel.release)"
+
+      - name: Package AnyKernel3 flashable ZIP
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/proton-clang/bin:$PATH"
+          bash scripts/package-anykernel3.sh 2>&1 | tee package.log
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miatoll-build-failure-${{ github.run_number }}
+          path: |
+            build.log
+            package.log
+            out/.config
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: miatoll-kernel-${{ github.run_number }}
+          path: |
+            artifacts/
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/dtbo.img
+            out/arch/arm64/boot/dts/qcom/cust-atoll-ab.dtb
+            out/kernel.release
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 90
