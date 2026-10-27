@@ -111,6 +111,9 @@ jobs:
               df -h || true
               exit 1
             fi
+            # GITHUB_PATH only affects LATER steps; export for this step too so
+            # the version checks below and any same-step tool use can find them.
+            export PATH="$HOME/proton-clang/bin:$PATH"
             echo "$HOME/proton-clang/bin" >> "$GITHUB_PATH"
             clang --version | head -2
             ld.lld --version | head -1
