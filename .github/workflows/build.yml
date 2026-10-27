@@ -58,56 +58,64 @@ jobs:
             make python3 rsync zip curl ca-certificates gcc binutils
 
       - name: Fetch Proton Clang toolchain
+        shell: bash
         run: |
-          set -uo pipefail
-          # Everything is tee'd into a log uploaded with the failure
-          # artifacts so the exact failing source/HTTP code is always visible.
-          exec > >(tee toolchain-fetch.log) 2>&1
-          set -x
-          df -h "$HOME" /tmp || true
-          mkdir -p "$HOME/proton-clang"
-          ok=0
+          # Plain block redirect (no process substitution): GHA already
+          # captures step output, and the same stream is mirrored into a log
+          # that is uploaded with the failure artifacts.
+          LOG=toolchain-fetch.log
+          : > "$LOG"
+          {
+            set -x
+            echo "== connectivity probes"
+            curl -sS -o /dev/null -w 'github.com -> %{http_code}\n' https://github.com || true
+            curl -sS -o /dev/null -w 'codeload  -> %{http_code}\n' https://codeload.github.com || true
+            df -h "$HOME" /tmp || true
+            mkdir -p "$HOME/proton-clang"
+            ok=0
 
-          fetch_tarball() {
-            local name="$1" url="$2"
-            echo "==> [$name] codeload tarball: $url"
-            rm -f /tmp/proton.tar.gz
-            curl -fL --retry 3 --retry-all-errors --retry-delay 5 \
-                 --connect-timeout 30 --max-time 1800 \
-                 -w 'http=%{http_code} bytes=%{size_download} time=%{time_total}s\n' \
-                 -o /tmp/proton.tar.gz "$url" || return 1
-            test -s /tmp/proton.tar.gz || return 1
-            tar -xzf /tmp/proton.tar.gz -C "$HOME/proton-clang" --strip-components=1 || return 1
-            rm -f /tmp/proton.tar.gz
-          }
+            fetch_tarball() {
+              local name="$1" url="$2"
+              echo "==> [$name] codeload tarball: $url"
+              rm -f /tmp/proton.tar.gz
+              curl -fL --retry 1 --retry-all-errors --retry-delay 5 \
+                   --connect-timeout 20 --max-time 1800 \
+                   -w 'http=%{http_code} bytes=%{size_download} time=%{time_total}s\n' \
+                   -o /tmp/proton.tar.gz "$url" || return 1
+              test -s /tmp/proton.tar.gz || return 1
+              tar -xzf /tmp/proton.tar.gz -C "$HOME/proton-clang" --strip-components=1 || return 1
+              rm -f /tmp/proton.tar.gz
+            }
 
-          fetch_git() {
-            local url="$1"
-            echo "==> shallow git fallback: $url"
-            rm -rf /tmp/proton-git
-            git clone --depth=1 --single-branch "$url" /tmp/proton-git || return 1
-            cp -a /tmp/proton-git/. "$HOME/proton-clang/"
-            rm -rf /tmp/proton-git
-          }
+            fetch_git() {
+              local url="$1"
+              echo "==> shallow git fallback: $url"
+              rm -rf /tmp/proton-git
+              git clone --depth=1 --single-branch "$url" /tmp/proton-git || return 1
+              cp -a /tmp/proton-git/. "$HOME/proton-clang/"
+              rm -rf /tmp/proton-git
+            }
 
-          if fetch_tarball upstream "$PROTON_URL"; then
-            ok=1
-          elif fetch_tarball aicp-mirror "$PROTON_MIRROR_URL"; then
-            ok=1
-          elif fetch_git "$PROTON_GIT_URL"; then
-            ok=1
-          fi
+            # Lighter mirror first (smaller repo, more reliable archive
+            # generation), then the upstream tarball, then a git fallback.
+            if fetch_tarball aicp-mirror "$PROTON_MIRROR_URL"; then
+              ok=1
+            elif fetch_tarball upstream "$PROTON_URL"; then
+              ok=1
+            elif fetch_git "$PROTON_GIT_URL"; then
+              ok=1
+            fi
 
-          set +x
-          if [ "$ok" != 1 ] || [ ! -x "$HOME/proton-clang/bin/clang" ]; then
-            echo "::error::all Proton Clang sources failed; see toolchain-fetch.log"
-            df -h || true
-            exit 1
-          fi
-          echo "$HOME/proton-clang/bin" >> "$GITHUB_PATH"
-          clang --version | head -2
-          ld.lld --version | head -1
-          llvm-ar --version | head -1
+            if [ "$ok" != 1 ] || [ ! -x "$HOME/proton-clang/bin/clang" ]; then
+              echo "::error::all Proton Clang sources failed; see toolchain-fetch.log"
+              df -h || true
+              exit 1
+            fi
+            echo "$HOME/proton-clang/bin" >> "$GITHUB_PATH"
+            clang --version | head -2
+            ld.lld --version | head -1
+            llvm-ar --version | head -1
+          } 2>&1 | tee "$LOG"
 
       - name: Verify toolchain capabilities (Polly, LLD, IAS)
         run: |
