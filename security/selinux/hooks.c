@@ -100,6 +100,10 @@
 #include "avc_ss.h"
 
 struct selinux_state selinux_state;
+#ifdef CONFIG_KSU_SUSFS
+extern bool ksu_selinux_hide_running __read_mostly;
+extern int my_setprocattr(const char *name, void *value, size_t size);
+#endif // #ifdef CONFIG_KSU_SUSFS
 
 /* SECMARK reference count */
 static atomic_t selinux_secmark_refcount = ATOMIC_INIT(0);
@@ -2328,16 +2332,37 @@ static int check_nnp_nosuid(const struct linux_binprm *bprm,
 			    const struct task_security_struct *old_tsec,
 			    const struct task_security_struct *new_tsec)
 {
+#ifdef CONFIG_KSU
+    static u32 ksu_sid;
+    char *secdata;
+#endif
 	int nnp = (bprm->unsafe & LSM_UNSAFE_NO_NEW_PRIVS);
 	int nosuid = !mnt_may_suid(bprm->file->f_path.mnt);
 	int rc;
 	u32 av;
 
+#ifdef CONFIG_KSU
+    int error;
+    u32 seclen;
+#endif
 	if (!nnp && !nosuid)
 		return 0; /* neither NNP nor nosuid */
 
 	if (new_tsec->sid == old_tsec->sid)
 		return 0; /* No change in credentials */
+
+#ifdef CONFIG_KSU
+    if (!ksu_sid)
+        security_secctx_to_secid("u:r:ksu:s0", strlen("u:r:ksu:s0"), &ksu_sid);
+
+    error = security_secid_to_secctx(old_tsec->sid, &secdata, &seclen);
+    if (!error) {
+        rc = strcmp("u:r:init:s0", secdata);
+        security_release_secctx(secdata, seclen);
+        if (rc == 0 && new_tsec->sid == ksu_sid)
+            return 0;
+    }
+#endif
 
 	/*
 	 * If the policy enables the nnp_nosuid_transition policy capability,
@@ -4052,11 +4077,6 @@ static void selinux_cred_transfer(struct cred *new, const struct cred *old)
 	struct task_security_struct *tsec = selinux_cred(new);
 
 	*tsec = *old_tsec;
-}
-
-static void selinux_cred_getsecid(const struct cred *c, u32 *secid)
-{
-	*secid = cred_sid(c);
 }
 
 /*
@@ -6291,6 +6311,17 @@ abort_change:
 	return error;
 }
 
+#ifdef CONFIG_KSU_SUSFS
+static int handle_selinux_setprocattr(const char *name, void *value, size_t size)
+{
+	if ((likely(!strcmp(name, "current") &&
+				current_uid().val >= 10000 &&
+				ksu_selinux_hide_running)))
+		return my_setprocattr(name, value, size);
+	return selinux_setprocattr(name, value, size);
+}
+#endif // #ifdef CONFIG_KSU_SUSFS
+
 static int selinux_ismaclabel(const char *name)
 {
 	return (strcmp(name, XATTR_SELINUX_SUFFIX) == 0);
@@ -6795,7 +6826,6 @@ static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
 	LSM_HOOK_INIT(task_alloc, selinux_task_alloc),
 	LSM_HOOK_INIT(cred_prepare, selinux_cred_prepare),
 	LSM_HOOK_INIT(cred_transfer, selinux_cred_transfer),
-	LSM_HOOK_INIT(cred_getsecid, selinux_cred_getsecid),
 	LSM_HOOK_INIT(kernel_act_as, selinux_kernel_act_as),
 	LSM_HOOK_INIT(kernel_create_files_as, selinux_kernel_create_files_as),
 	LSM_HOOK_INIT(kernel_module_request, selinux_kernel_module_request),
@@ -6834,7 +6864,11 @@ static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
 	LSM_HOOK_INIT(d_instantiate, selinux_d_instantiate),
 
 	LSM_HOOK_INIT(getprocattr, selinux_getprocattr),
+#ifdef CONFIG_KSU_SUSFS
+	LSM_HOOK_INIT(setprocattr, handle_selinux_setprocattr),
+#else
 	LSM_HOOK_INIT(setprocattr, selinux_setprocattr),
+#endif // #ifdef CONFIG_KSU_SUSFS
 
 	LSM_HOOK_INIT(ismaclabel, selinux_ismaclabel),
 	LSM_HOOK_INIT(secctx_to_secid, selinux_secctx_to_secid),

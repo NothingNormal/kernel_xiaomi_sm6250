@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      ksu_ref:
+        description: "BakaSU branch, tag or commit"
+        required: false
+        type: string
+        default: "d5e9e025"
   push:
     branches: [16]
 
@@ -40,6 +45,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      - name: Set up BakaSU
+        run: |
+          ref="${{ inputs.ksu_ref || 'd5e9e025' }}"
+          git clone --filter=blob:none https://github.com/Baka-SU/BakaSU KernelSU
+          git -C KernelSU checkout -q "$ref"
+          echo "BakaSU: $(git -C KernelSU log -1 --format='%h %s') ($(git -C KernelSU rev-list --count HEAD) commits)"
+
       - name: Configure git
         run: git config --global init.defaultBranch main
 

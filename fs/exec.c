@@ -62,6 +62,9 @@
 #include <linux/oom.h>
 #include <linux/compat.h>
 #include <linux/vmalloc.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#endif
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -76,6 +79,16 @@ int suid_dumpable = 0;
 
 static LIST_HEAD(formats);
 static DEFINE_RWLOCK(binfmt_lock);
+
+#define ZYGOTE32_BIN "/system/bin/app_process32"
+#define ZYGOTE64_BIN "/system/bin/app_process64"
+static pid_t zygote32_pid;
+static pid_t zygote64_pid;
+
+bool is_zygote_pid(pid_t pid)
+{
+	return pid == zygote32_pid || pid == zygote64_pid;
+}
 
 void __register_binfmt(struct linux_binfmt * fmt, int insert)
 {
@@ -1040,10 +1053,12 @@ static int exec_mmap(struct mm_struct *mm)
 	if (!IS_ENABLED(CONFIG_ARCH_WANT_IRQS_OFF_ACTIVATE_MM))
 		local_irq_enable();
 	activate_mm(active_mm, mm);
+	lru_gen_switch_mm(active_mm, mm);
 	if (IS_ENABLED(CONFIG_ARCH_WANT_IRQS_OFF_ACTIVATE_MM))
 		local_irq_enable();
 	tsk->mm->vmacache_seqnum = 0;
 	vmacache_flush(tsk);
+	lru_gen_add_mm(mm);
 	task_unlock(tsk);
 	if (old_mm) {
 		up_read(&old_mm->mmap_sem);
@@ -1714,6 +1729,19 @@ static int exec_binprm(struct linux_binprm *bprm)
 /*
  * sys_execve() executes a new program.
  */
+
+#ifdef CONFIG_KSU_SUSFS
+extern struct static_key_true ksu_su_compat_enabled;
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+extern bool __ksu_is_allow_uid_for_current(uid_t uid);
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
+			void *envp, int *flags);
+extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv,
+				void *envp, int *flags);
+extern int ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv,
+				void *envp, int *flags, int *retval);
+#endif
+
 static int __do_execve_file(int fd, struct filename *filename,
 			    struct user_arg_ptr argv,
 			    struct user_arg_ptr envp,
@@ -1723,9 +1751,28 @@ static int __do_execve_file(int fd, struct filename *filename,
 	struct linux_binprm *bprm;
 	struct files_struct *displaced;
 	int retval;
+#ifdef CONFIG_KSU_SUSFS
+	bool is_su_session = false;
+#endif // #ifdef CONFIG_KSU_SUSFS
 
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
+
+#ifdef CONFIG_KSU_SUSFS
+	/* 4.14: do_execve_file() (usermode helpers) passes no filename */
+	if (!filename || likely(susfs_is_current_proc_no_su()))
+		goto orig_flow;
+
+	if (static_branch_likely(&ksu_su_compat_enabled)) {
+		if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {
+			is_su_session = !ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+		} else {
+			is_su_session = !ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
+		}
+	}
+
+orig_flow:
+#endif
 
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
@@ -1840,8 +1887,19 @@ static int __do_execve_file(int fd, struct filename *filename,
 	}
 
 	retval = exec_binprm(bprm);
+#ifdef CONFIG_KSU_SUSFS
+	if (unlikely(is_su_session))
+		(void)ksu_handle_post_execveat_sucompat(&fd, &filename, &argv, &envp, &flags, &retval);
+#endif // #ifdef CONFIG_KSU_SUSFS
 	if (retval < 0)
 		goto out;
+
+	if (capable(CAP_SYS_ADMIN)) {
+		if (unlikely(!strcmp(filename->name, ZYGOTE32_BIN)))
+			zygote32_pid = current->pid;
+		else if (unlikely(!strcmp(filename->name, ZYGOTE64_BIN)))
+			zygote64_pid = current->pid;
+	}
 
 	/* execve succeeded */
 	current->fs->in_exec = 0;
