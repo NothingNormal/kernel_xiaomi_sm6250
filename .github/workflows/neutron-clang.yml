@@ -205,19 +205,14 @@ jobs:
           ui_print " " "First boot may take a few minutes while caches are rebuilt.";
           EOF
 
-          # Copy kernel Image.gz only (skip dtbo packaging as requested)
+          # Copy kernel Image.gz only
           cp out/arch/arm64/boot/Image.gz anykernel/Image.gz
-          printf 'kernel=%s\nclang=%s\ncommit=%s\n' \
-            "$KERNEL_NAME" "${{ steps.neutron.outputs.tag }}" "${GITHUB_SHA}" > anykernel/build-info.txt
           (cd anykernel && zip -r9 "$GITHUB_WORKSPACE/${ZIP_NAME}.zip" .)
 
       - name: Upload CI artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ZIP_NAME }}
-          path: |
-            ${{ env.ZIP_NAME }}.zip
-            out/arch/arm64/boot/Image.gz
-            out/.config
+          path: ${{ env.ZIP_NAME }}.zip
           if-no-files-found: error
           retention-days: 14
