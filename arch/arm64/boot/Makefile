@@ -26,9 +26,9 @@ DTB_LIST := $(addsuffix .dtb,$(DTB_NAMES))
 else
 DTB_LIST := $(dtb-y)
 endif
-DTB_OBJS := $(shell find $(obj)/dts/ -name \*.dtb)
+DTB_OBJS := $(shell [ -d $(obj)/dts ] && find $(obj)/dts/ -name \*.dtb 2>/dev/null)
 
-DTBO_OBJS := $(shell find $(obj)/dts/ -name \*.dtbo)
+DTBO_OBJS := $(shell [ -d $(obj)/dts ] && find $(obj)/dts/ -name \*.dtbo 2>/dev/null)
 
 # Add RTIC DTB to the DTB list if RTIC MPGen is enabled
 # Note, we keep this for compatibility with
