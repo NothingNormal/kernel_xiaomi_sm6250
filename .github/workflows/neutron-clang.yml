@@ -97,9 +97,9 @@ jobs:
           set -euo pipefail
           make -j"$(nproc)" O=out ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
             $MAKE_TOOLS \
-            Image.gz-dtb
-          test -s out/arch/arm64/boot/Image.gz-dtb
-          ls -lh out/arch/arm64/boot/Image.gz-dtb
+            Image.gz
+          test -s out/arch/arm64/boot/Image.gz
+          ls -lh out/arch/arm64/boot/Image.gz
           ccache --show-stats
 
       - name: Package AnyKernel3
@@ -107,7 +107,7 @@ jobs:
           set -euo pipefail
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
           rm -rf anykernel/.git anykernel/.github
-          cp out/arch/arm64/boot/Image.gz-dtb anykernel/Image.gz-dtb
+          cp out/arch/arm64/boot/Image.gz anykernel/Image.gz
           cat > anykernel/anykernel.sh <<'EOF'
           ### AnyKernel3 Ramdisk Mod Script
           ## osm0sis @ xda-developers
@@ -151,7 +151,7 @@ jobs:
           name: Miatoll-Neutron-${{ steps.neutron.outputs.tag }}-${{ github.sha }}
           path: |
             Miatoll-Neutron-*.zip
-            out/arch/arm64/boot/Image.gz-dtb
+            out/arch/arm64/boot/Image.gz
             out/.config
           if-no-files-found: error
           retention-days: 14
