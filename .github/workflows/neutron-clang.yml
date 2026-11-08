@@ -1,4 +1,4 @@
-name: Miatoll Neutron Clang
+name: SixFaced Kernel
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: neutron-clang-${{ github.ref }}
+  group: sixfaced-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -49,7 +49,7 @@ jobs:
       - name: Set build version and names
         run: |
           name=$(sed -n 's/^CONFIG_LOCALVERSION="-\(.*\)"/\1/p' "arch/arm64/configs/${DEFCONFIG}")
-          if [ -z "$name" ]; then name="Miatoll"; fi
+          if [ -z "$name" ]; then name="SixFaced"; fi
           date_tag=$(date -u +%Y%m%d-%H%M)
           echo "KERNEL_NAME=${name}" >> "$GITHUB_ENV"
           echo "ZIP_NAME=${name}-${date_tag}-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
@@ -169,11 +169,11 @@ jobs:
           do.systemless=1
           do.cleanup=1
           do.cleanuponabort=0
-          device.name1=miatoll
-          device.name2=curtana
-          device.name3=joyeuse
-          device.name4=excalibur
-          device.name5=gram
+          device.name1=curtana
+          device.name2=joyeuse
+          device.name3=excalibur
+          device.name4=gram
+          device.name5=
           supported.versions=
           supported.patchlevels=
           supported.vendorpatchlevels=
