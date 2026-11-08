@@ -48,7 +48,7 @@ jobs:
 
       - name: Set build version and names
         run: |
-          name=$(sed -n 's/^CONFIG_LOCALVERSION="-\(.*\)"//p' "arch/arm64/configs/${DEFCONFIG}")
+          name=$(sed -n 's/^CONFIG_LOCALVERSION="-\(.*\)"/\1/p' "arch/arm64/configs/${DEFCONFIG}")
           if [ -z "$name" ]; then name="Miatoll"; fi
           date_tag=$(date -u +%Y%m%d-%H%M)
           echo "KERNEL_NAME=${name}" >> "$GITHUB_ENV"
