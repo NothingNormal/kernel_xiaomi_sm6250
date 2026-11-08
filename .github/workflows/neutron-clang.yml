@@ -37,7 +37,10 @@ env:
   CCACHE_COMPILERCHECK: content
   CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime,time_macros
   CCACHE_COMPRESS: true
+  CCACHE_COMPRESSLEVEL: 1
   CCACHE_MAXSIZE: 5G
+  KBUILD_BUILD_USER: NothingNormal
+  KBUILD_BUILD_HOST: github
 
 jobs:
   build:
@@ -142,6 +145,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ inputs.clean }}" = "true" ]; then export CCACHE_DISABLE=1; fi
+          ccache -z
           make -j$(( $(nproc --all) + 1 )) O=out ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
             $MAKE_TOOLS \
             Image.gz 2>&1 | tee build.log
@@ -153,7 +157,7 @@ jobs:
           fi
           test -s out/arch/arm64/boot/Image.gz
           ls -lh out/arch/arm64/boot/Image.gz
-          ccache --show-stats
+          ccache -s -v
 
       - name: Upload build log on failure
         if: failure()
