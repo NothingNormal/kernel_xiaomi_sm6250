@@ -2,6 +2,12 @@ name: Miatoll Neutron Clang
 
 on:
   workflow_dispatch:
+    inputs:
+      clean:
+        description: "Clean build (disable ccache)"
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [16]
 
@@ -16,6 +22,7 @@ env:
   ARCH: arm64
   DEFCONFIG: vendor/xiaomi/miatoll_defconfig
   CROSS_COMPILE: aarch64-linux-gnu-
+  CROSS_COMPILE_ARM32: arm-linux-gnueabi-
   MAKE_TOOLS: >-
     CC=clang LD=ld.lld AS=clang AR=llvm-ar NM=llvm-nm STRIP=llvm-strip
     OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
@@ -26,7 +33,7 @@ env:
   CCACHE_COMPILERCHECK: content
   CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime,time_macros
   CCACHE_COMPRESS: true
-  CCACHE_MAXSIZE: 2G
+  CCACHE_MAXSIZE: 5G
 
 jobs:
   build:
@@ -39,75 +46,117 @@ jobs:
       - name: Checkout kernel
         uses: actions/checkout@v7
 
+      - name: Set build version and names
+        run: |
+          name=$(sed -n 's/^CONFIG_LOCALVERSION="-\(.*\)"//p' "arch/arm64/configs/${DEFCONFIG}")
+          if [ -z "$name" ]; then name="Miatoll"; fi
+          date_tag=$(date -u +%Y%m%d-%H%M)
+          echo "KERNEL_NAME=${name}" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=${name}-${date_tag}-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison flex libelf-dev libssl-dev python3 \
+          sudo apt-get update -qq
+          sudo apt-get install -yqq --no-install-recommends \
+            bc bison flex libelf-dev libssl-dev python3 \
             cpio lz4 zstd rsync unzip zip curl ccache
 
-      - name: Fetch latest Neutron Clang
+      - name: Fetch latest Neutron Clang tag
         id: neutron
         run: |
           set -euo pipefail
           base=https://raw.githubusercontent.com/Neutron-Toolchains/clang-build-catalogue/main
           tag=$(curl -fsSL "$base/latest.txt" | awk '/^\[tag\]/{getline; gsub(/[[:space:]]/,""); print; exit}')
           test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Neutron Clang tag: $tag"
+
+      - name: Cache Neutron Clang
+        id: cache-neutron
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/neutron
+          key: neutron-clang-${{ steps.neutron.outputs.tag }}
+
+      - name: Download Neutron Clang
+        if: steps.cache-neutron.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          base=https://raw.githubusercontent.com/Neutron-Toolchains/clang-build-catalogue/main
+          tag="${{ steps.neutron.outputs.tag }}"
           sha=$(curl -fsSL "$base/${tag}-info.txt" | awk '/^\[shasum\]/{getline; gsub(/[[:space:]]/,""); print; exit}')
           test -n "$sha"
           url="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/${tag}/neutron-clang-${tag}.tar.zst"
-          echo "Neutron Clang tag: $tag"
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/neutron-clang.tar.zst" "$url"
           echo "${sha}  $RUNNER_TEMP/neutron-clang.tar.zst" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/neutron"
           tar --use-compress-program=unzstd -xf "$RUNNER_TEMP/neutron-clang.tar.zst" -C "$RUNNER_TEMP/neutron"
+          rm -f "$RUNNER_TEMP/neutron-clang.tar.zst"
+
+      - name: Setup toolchain environment
+        run: |
           echo "$RUNNER_TEMP/neutron/bin" >> "$GITHUB_PATH"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          "$RUNNER_TEMP/neutron/bin/clang" --version
-          "$RUNNER_TEMP/neutron/bin/ld.lld" --version
-          # ccache masquerade: clang/clang++ resolve to ccache, which finds the
-          # real compiler via CCACHE_PATH. Keeps make variables plain.
           mkdir -p "$RUNNER_TEMP/ccache-bin"
           ln -sf "$(command -v ccache)" "$RUNNER_TEMP/ccache-bin/clang"
           ln -sf "$(command -v ccache)" "$RUNNER_TEMP/ccache-bin/clang++"
           echo "$RUNNER_TEMP/ccache-bin" >> "$GITHUB_PATH"
           echo "CCACHE_PATH=$RUNNER_TEMP/neutron/bin" >> "$GITHUB_ENV"
-          ccache --version | head -1
+          "$RUNNER_TEMP/neutron/bin/clang" --version
+          "$RUNNER_TEMP/neutron/bin/ld.lld" --version
 
       - name: Restore ccache
+        if: ${{ !inputs.clean }}
         uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-neutron-${{ steps.neutron.outputs.tag }}-${{ github.run_id }}
+          key: ccache-neutron-${{ steps.neutron.outputs.tag }}-${{ github.sha }}
           restore-keys: |
             ccache-neutron-${{ steps.neutron.outputs.tag }}-
+            ccache-neutron-
 
       - name: Configure
         run: |
           set -euo pipefail
-          make -j"$(nproc)" O=out ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+          make -j"$(nproc --all)" O=out ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
             $MAKE_TOOLS "$DEFCONFIG"
-          # This 4.14 LTO path only supports GNU gold; a pure-LLVM lld build is non-LTO.
+          # 4.14 LTO path only supports GNU gold; a pure-LLVM lld build is non-LTO
           scripts/config --file out/.config -d LTO_CLANG -d THINLTO
-          make -j"$(nproc)" O=out ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+          make -j"$(nproc --all)" O=out ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
             $MAKE_TOOLS olddefconfig
-          grep -E '^CONFIG_(LTO_CLANG|THINLTO|CC_IS_CLANG)=' out/.config || true
+          grep -E '^CONFIG_(LTO_CLANG|THINLTO|CC_IS_CLANG|LLVM_POLLY|INLINE_OPTIMIZATION)=' out/.config || true
 
       - name: Build kernel
         run: |
           set -euo pipefail
-          make -j"$(nproc)" O=out ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+          if [ "${{ inputs.clean }}" = "true" ]; then export CCACHE_DISABLE=1; fi
+          make -j"$(nproc --all)" O=out ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
             $MAKE_TOOLS \
-            Image.gz
+            Image.gz 2>&1 | tee build.log
+          rc="${PIPESTATUS[0]}"
+          if [ "$rc" -ne 0 ]; then
+            grep -E 'error:|Error [0-9]|undefined reference|undefined symbol|ld.lld:' build.log | grep -v '^make\[' | sort -u | head -40 |
+              while IFS= read -r l; do echo "::error::${l//%/%25}"; done
+            exit "$rc"
+          fi
           test -s out/arch/arm64/boot/Image.gz
           ls -lh out/arch/arm64/boot/Image.gz
           ccache --show-stats
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log-${{ github.sha }}
+          path: build.log
+          retention-days: 7
 
       - name: Package AnyKernel3
         run: |
           set -euo pipefail
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
-          rm -rf anykernel/.git anykernel/.github
-          cp out/arch/arm64/boot/Image.gz anykernel/Image.gz
+          rm -rf anykernel/.git anykernel/.github anykernel/README.md
+
+          # Optimized miatoll anykernel config (pure Image.gz, skip dtbo)
           cat > anykernel/anykernel.sh <<'EOF'
           ### AnyKernel3 Ramdisk Mod Script
           ## osm0sis @ xda-developers
@@ -117,40 +166,57 @@ jobs:
           kernel.string=Miatoll Neutron Clang
           do.devicecheck=1
           do.modules=0
-          do.systemless=0
+          do.systemless=1
           do.cleanup=1
           do.cleanuponabort=0
-          device.name1=curtana
-          device.name2=joyeuse
-          device.name3=excalibur
-          device.name4=gram
-          device.name5=
+          device.name1=miatoll
+          device.name2=curtana
+          device.name3=joyeuse
+          device.name4=excalibur
+          device.name5=gram
           supported.versions=
           supported.patchlevels=
           supported.vendorpatchlevels=
           '; }
 
           ### AnyKernel install
-          BLOCK=/dev/block/bootdevice/by-name/boot;
-          IS_SLOT_DEVICE=auto;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=auto;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
 
           . tools/ak3-core.sh;
 
-          dump_boot;
-          write_boot;
+          boot_attributes() {
+          set_perm_recursive 0 0 755 644 $ramdisk/*;
+          set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
+          }
+
+          split_boot;
+          flash_boot;
+
+          ## cache cleanup
+          ui_print " " "Cleaning cache, dalvik-cache and package cache...";
+          for f in /cache/* /cache/.[!.]*; do
+            [ -e "$f" ] && [ "${f##*/}" != recovery ] && rm -rf "$f";
+          done;
+          rm -rf /data/dalvik-cache/* /data/system/package_cache/* 2>/dev/null;
+
+          ui_print " " "First boot may take a few minutes while caches are rebuilt.";
           EOF
-          printf 'kernel=Miatoll Neutron Clang\nclang=%s\ncommit=%s\n' \
-            "${{ steps.neutron.outputs.tag }}" "${GITHUB_SHA}" > anykernel/build-info.txt
-          (cd anykernel && zip -r9 "$GITHUB_WORKSPACE/Miatoll-Neutron-${{ steps.neutron.outputs.tag }}-${GITHUB_SHA::12}.zip" .)
+
+          # Copy kernel Image.gz only (skip dtbo packaging as requested)
+          cp out/arch/arm64/boot/Image.gz anykernel/Image.gz
+          printf 'kernel=%s\nclang=%s\ncommit=%s\n' \
+            "$KERNEL_NAME" "${{ steps.neutron.outputs.tag }}" "${GITHUB_SHA}" > anykernel/build-info.txt
+          (cd anykernel && zip -r9 "$GITHUB_WORKSPACE/${ZIP_NAME}.zip" .)
 
       - name: Upload CI artifact
         uses: actions/upload-artifact@v7
         with:
-          name: Miatoll-Neutron-${{ steps.neutron.outputs.tag }}-${{ github.sha }}
+          name: ${{ env.ZIP_NAME }}
           path: |
-            Miatoll-Neutron-*.zip
+            ${{ env.ZIP_NAME }}.zip
             out/arch/arm64/boot/Image.gz
             out/.config
           if-no-files-found: error
