@@ -126,24 +126,6 @@ jobs:
           ref="${{ inputs.ksu_ref || 'd5e9e025' }}"
           git clone --filter=blob:none https://github.com/Baka-SU/BakaSU KernelSU
           git -C KernelSU checkout -q "$ref"
-          # Support SUSFS v2.4.0 CMD_SUSFS_SET_PRIORITY_UID_FILTER in supercall
-          if ! grep -q "CMD_SUSFS_SET_PRIORITY_UID_FILTER" KernelSU/kernel/supercall/dispatch.c; then
-            sed -i '/case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING:/i \
-#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\
-    case CMD_SUSFS_SET_PRIORITY_UID_FILTER: {\
-        susfs_set_priority_uid_filter(arg);\
-        return 0;\
-    }\
-#endif' KernelSU/kernel/supercall/dispatch.c
-          fi
-          if ! grep -q "KSU_SUSFS_PRIORITY_UID_FILTER" KernelSU/kernel/Kconfig; then
-            sed -i '/config KSU_SUSFS_SUS_MAP/,/endmenu/ { /endmenu/i \
-config KSU_SUSFS_PRIORITY_UID_FILTER\
-    bool "Enable to allow adding user-defined uids that will be hidden from getpriority/setpriority/ioprio_get/ioprio_set syscall"\
-    depends on KSU_SUSFS\
-    default y\
-' KernelSU/kernel/Kconfig ; }
-          fi
           echo "BakaSU: $(git -C KernelSU log -1 --format='%h %s') ($(git -C KernelSU rev-list --count HEAD) commits)"
 
       - name: Configure
