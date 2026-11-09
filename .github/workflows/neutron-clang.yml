@@ -173,54 +173,28 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
           rm -rf anykernel/.git anykernel/.github anykernel/README.md
 
-          # Optimized miatoll anykernel config (pure Image.gz, skip dtbo)
-          cat > anykernel/anykernel.sh <<'EOF'
-          ### AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
-
-          ### AnyKernel setup
-          properties() { '
-          kernel.string=SixFaced
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=curtana
-          device.name2=joyeuse
-          device.name3=excalibur
-          device.name4=gram
-          device.name5=
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; }
-
-          ### AnyKernel install
-          block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=auto;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
-
-          . tools/ak3-core.sh;
-
-          boot_attributes() {
-          set_perm_recursive 0 0 755 644 $ramdisk/*;
-          set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
-          }
-
-          split_boot;
-          flash_boot;
-
-          ## cache cleanup
-          ui_print " " "Cleaning cache, dalvik-cache and package cache...";
-          for f in /cache/* /cache/.[!.]*; do
-            [ -e "$f" ] && [ "${f##*/}" != recovery ] && rm -rf "$f";
-          done;
-          rm -rf /data/dalvik-cache/* /data/system/package_cache/* 2>/dev/null;
-
-          ui_print " " "First boot may take a few minutes while caches are rebuilt.";
-          EOF
+          # Adapt the official AnyKernel3 template; never shadow its uppercase API variables.
+          test "$(grep -c '^. tools/ak3-core.sh;$' anykernel/anykernel.sh)" -eq 1
+          sed -n '1,/^\. tools\/ak3-core.sh;$/p' anykernel/anykernel.sh > "$RUNNER_TEMP/anykernel.sh"
+          grep -qxF '. tools/ak3-core.sh;' "$RUNNER_TEMP/anykernel.sh"
+          for setting in kernel.string device.name1 device.name2 device.name3 device.name4 device.name5 BLOCK IS_SLOT_DEVICE RAMDISK_COMPRESSION PATCH_VBMETA_FLAG; do
+            test "$(grep -c "^$setting=" "$RUNNER_TEMP/anykernel.sh")" -eq 1
+          done
+          sed -i \
+            -e 's/^kernel.string=.*/kernel.string=SixFaced/' \
+            -e 's/^device.name1=.*/device.name1=curtana/' \
+            -e 's/^device.name2=.*/device.name2=joyeuse/' \
+            -e 's/^device.name3=.*/device.name3=excalibur/' \
+            -e 's/^device.name4=.*/device.name4=gram/' \
+            -e 's/^device.name5=.*/device.name5=/' \
+            -e 's/^BLOCK=.*/BLOCK=boot;/' \
+            -e 's/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=0;/' \
+            -e 's/^RAMDISK_COMPRESSION=.*/RAMDISK_COMPRESSION=auto;/' \
+            -e 's/^PATCH_VBMETA_FLAG=.*/PATCH_VBMETA_FLAG=auto;/' \
+            "$RUNNER_TEMP/anykernel.sh"
+          printf '\nsplit_boot;\nflash_boot;\n' >> "$RUNNER_TEMP/anykernel.sh"
+          bash -n "$RUNNER_TEMP/anykernel.sh"
+          mv "$RUNNER_TEMP/anykernel.sh" anykernel/anykernel.sh
 
           # Copy kernel Image.gz only
           cp out/arch/arm64/boot/Image.gz anykernel/Image.gz
