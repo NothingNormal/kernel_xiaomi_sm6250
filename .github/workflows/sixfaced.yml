@@ -36,7 +36,7 @@ jobs:
           tmp=$(mktemp -d)
           cd "$tmp"
           curl -fsSL --retry 3 https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest -o release.json
-          asset=$(jq -ec '[.assets[] | select(.name | test("^neutron-clang-[0-9]+\\\\.tar\\\\.zst$"))] | select(length == 1) | first' release.json)
+          asset=$(jq -ec '[.assets[] | select(.name | test("^neutron-clang-[0-9]+[.]tar[.]zst$"))] | select(length == 1) | first' release.json)
           url=$(jq -er '.browser_download_url' <<< "$asset")
           sha=$(jq -er '.digest | capture("^sha256:(?<hex>[0-9a-f]{64})$").hex' <<< "$asset")
           curl -fL --retry 3 "$url" -o neutron.tar.zst
@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           args=(ARCH=arm64 O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
                 OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-                READELF=llvm-readelf LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
+                READELF=llvm-readelf KCFLAGS=-mtune=cortex-a76 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
                 CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-)
           make "${args[@]}" vendor/xiaomi/miatoll_defconfig
           make -j"$(nproc)" "${args[@]}" Image
