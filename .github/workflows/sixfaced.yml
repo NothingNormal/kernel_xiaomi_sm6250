@@ -20,10 +20,10 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            bc bison build-essential ca-certificates curl flex git jq libelf-dev \
+            bc bison build-essential ca-certificates ccache curl flex git jq libelf-dev \
             libssl-dev libncurses-dev lz4 python3 zip unzip zstd xz-utils cpio kmod \
             gcc-arm-linux-gnueabi gcc-aarch64-linux-gnu device-tree-compiler
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - name: Fetch pinned AnyKernel3
@@ -35,6 +35,7 @@ jobs:
           git -C KernelSU-Next describe --tags --always
           bash scripts/prepare-ksun.sh
       - name: Install latest Neutron Clang
+        id: neutron
         run: |
           set -euo pipefail
           tmp=$(mktemp -d)
@@ -49,10 +50,24 @@ jobs:
           tar --zstd -xf neutron.tar.zst -C /opt/neutron
           /opt/neutron/bin/clang --version
           echo /opt/neutron/bin >> "$GITHUB_PATH"
+          echo "digest=$sha" >> "$GITHUB_OUTPUT"
+      - name: Restore compiler cache
+        uses: actions/cache@v5
+        with:
+          path: .ccache
+          key: ccache-v1-${{ runner.os }}-${{ runner.arch }}-miatoll-${{ steps.neutron.outputs.digest }}-${{ github.sha }}
+          restore-keys: |
+            ccache-v1-${{ runner.os }}-${{ runner.arch }}-miatoll-${{ steps.neutron.outputs.digest }}-
       - name: Build arm64 Image
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_COMPILERCHECK: content
+          CCACHE_MAXSIZE: 2G
         run: |
           set -euo pipefail
-          args=(ARCH=arm64 O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+          ccache --zero-stats
+          args=(ARCH=arm64 O=out "CC=ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm
                 OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
                 READELF=llvm-readelf "KCFLAGS=-mtune=cortex-a76 -DKSU_SEPOL_HAS_NATIVE_ARRAYS" LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
                 CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-)
@@ -60,12 +75,13 @@ jobs:
           grep -qx 'CONFIG_KSU=y' out/.config
           grep -qx 'CONFIG_KSU_MANUAL_HOOK=y' out/.config
           make -j"$(nproc)" "${args[@]}" Image
+          ccache --show-stats
           llvm-nm out/vmlinux > out/vmlinux.symbols
           grep -E " [tT] kernelsu_init$" out/vmlinux.symbols
           grep -E " [tT] ksu_handle_sys_reboot$" out/vmlinux.symbols
           scripts/package-sixfaced.sh out/arch/arm64/boot/Image SixFaced.zip
           unzip -tq SixFaced.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: SixFaced-miatoll-${{ github.run_number }}
           path: SixFaced.zip
