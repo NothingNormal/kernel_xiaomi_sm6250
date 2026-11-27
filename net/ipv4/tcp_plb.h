@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _TCP_PLB_H
 #define _TCP_PLB_H
 
@@ -9,16 +10,9 @@ struct tcp_plb_state {
 	u32 pause_until;
 };
 
-static inline void tcp_plb_update_state(const struct sock *sk, struct tcp_plb_state *plb, const int cong_ratio)
-{
-}
-
-static inline void tcp_plb_check_rehash(struct sock *sk, struct tcp_plb_state *plb)
-{
-}
-
-static inline void tcp_plb_update_state_upon_rto(const struct sock *sk, struct tcp_plb_state *plb)
-{
-}
+void tcp_plb_update_state(const struct sock *sk, struct tcp_plb_state *plb,
+			  const int cong_ratio);
+void tcp_plb_check_rehash(struct sock *sk, struct tcp_plb_state *plb);
+void tcp_plb_update_state_upon_rto(struct sock *sk, struct tcp_plb_state *plb);
 
 #endif /* _TCP_PLB_H */

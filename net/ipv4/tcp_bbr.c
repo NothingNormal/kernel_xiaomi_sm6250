@@ -1108,6 +1108,7 @@ static void bbr_check_ecn_too_high_in_startup(struct sock *sk, u32 ce_ratio)
 /* Updates ecn_alpha and returns ce_ratio. -1 if not available. */
 static int bbr_update_ecn_alpha(struct sock *sk)
 {
+	const struct net *net = sock_net(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bbr *bbr = inet_csk_ca(sk);
 	s32 delivered, delivered_ce;
@@ -1123,7 +1124,9 @@ static int bbr_update_ecn_alpha(struct sock *sk)
 		bbr->ecn_eligible = 1;
 
 	/* Skip updating alpha only if not ECN-eligible and PLB is disabled. */
-	want_ecn_alpha = bbr->ecn_eligible;
+	want_ecn_alpha = bbr->ecn_eligible ||
+		(bbr_can_use_ecn(sk) &&
+		 READ_ONCE(net->ipv4.sysctl_tcp_plb_enabled));
 	if (!want_ecn_alpha)
 		return -1;
 
@@ -2185,7 +2188,11 @@ __bpf_kfunc static void bbr_init(struct sock *sk)
 	bbr->ecn_alpha = bbr_param(sk, ecn_alpha_init);
 	bbr->alpha_last_delivered = 0;
 	bbr->alpha_last_delivered_ce = 0;
+	bbr->plb.consec_cong_rounds = 0;
 	bbr->plb.pause_until = 0;
+
+	if (bbr_can_use_ecn(sk))
+		tp->ecn_flags |= TCP_ECN_ECT_PERMANENT;
 
 	/* 4.14 has no receiver-side fast_ack_mode, nothing to set */
 }

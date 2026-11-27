@@ -419,6 +419,13 @@ static inline void tcp_dec_quickack_mode(struct sock *sk,
 #define	TCP_ECN_LOW		16
 #define	TCP_ECN_ECT_PERMANENT	32
 
+static inline void tcp_set_ecn_low_from_dst(struct sock *sk,
+					    const struct dst_entry *dst)
+{
+	if (dst && dst_feature(dst, RTAX_FEATURE_ECN_LOW))
+		tcp_sk(sk)->ecn_flags |= TCP_ECN_LOW;
+}
+
 enum tcp_tw_status {
 	TCP_TW_SUCCESS = 0,
 	TCP_TW_RST = 1,
