@@ -50,6 +50,8 @@ static int calculate_f_flags(struct vfsmount *mnt)
 		flags_by_sb(mnt->mnt_sb->s_flags);
 }
 
+static int statfs_by_dentry(struct dentry *dentry, struct kstatfs *buf);
+
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 #include <linux/susfs_def.h>
 #include <linux/magic.h>
