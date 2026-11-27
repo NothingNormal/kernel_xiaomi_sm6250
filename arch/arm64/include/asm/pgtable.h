@@ -774,6 +774,10 @@ static inline void update_mmu_cache(struct vm_area_struct *vma,
 #define kc_vaddr_to_offset(v)	((v) & ~VA_START)
 #define kc_offset_to_vaddr(o)	((o) | VA_START)
 
+/* MGLRU page-table walkers must not descend into block mappings. */
+#define pmd_leaf(pmd)	pmd_sect(pmd)
+#define pud_leaf(pud)	pud_sect(pud)
+
 #endif /* !__ASSEMBLY__ */
 
 #endif /* __ASM_PGTABLE_H */

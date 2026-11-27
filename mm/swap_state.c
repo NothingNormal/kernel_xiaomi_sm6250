@@ -11,6 +11,7 @@
 #include <linux/gfp.h>
 #include <linux/kernel_stat.h>
 #include <linux/swap.h>
+#include <linux/mm_inline.h>
 #include <linux/swapops.h>
 #include <linux/init.h>
 #include <linux/pagemap.h>
@@ -111,7 +112,8 @@ void show_swap_cache_info(void)
  * __add_to_swap_cache resembles add_to_page_cache_locked on swapper_space,
  * but sets SwapCache flag and private instead of mapping and index.
  */
-int __add_to_swap_cache(struct page *page, swp_entry_t entry)
+static int add_to_swap_cache_shadow(struct page *page, swp_entry_t entry,
+				    void **shadowp)
 {
 	int error, i, nr = hpage_nr_pages(page);
 	struct address_space *address_space;
@@ -126,12 +128,27 @@ int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 
 	address_space = swap_address_space(entry);
 	spin_lock_irq(&address_space->tree_lock);
+	if (shadowp)
+		*shadowp = NULL;
 	for (i = 0; i < nr; i++) {
+		struct radix_tree_node *node;
+		void __rcu **slot;
+		void *old;
+
 		set_page_private(page + i, entry.val + i);
-		error = radix_tree_insert(&address_space->page_tree,
-					  idx + i, page + i);
+		error = __radix_tree_create(&address_space->page_tree, idx + i,
+					    0, &node, &slot);
 		if (unlikely(error))
 			break;
+		old = radix_tree_deref_slot_protected(slot, &address_space->tree_lock);
+		if (WARN_ON_ONCE(old && !radix_tree_exceptional_entry(old))) {
+			error = -EEXIST;
+			break;
+		}
+		__radix_tree_replace(&address_space->page_tree, node, slot,
+				     page + i, NULL, NULL);
+		if (shadowp && nr == 1)
+			*shadowp = old;
 	}
 	if (likely(!error)) {
 		address_space->nrpages += nr;
@@ -158,6 +175,11 @@ int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 }
 
 
+int __add_to_swap_cache(struct page *page, swp_entry_t entry)
+{
+	return add_to_swap_cache_shadow(page, entry, NULL);
+}
+
 int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp_mask)
 {
 	int error;
@@ -174,7 +196,7 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp_mask)
  * This must be called only on pages that have
  * been verified to be in the swap cache.
  */
-void __delete_from_swap_cache(struct page *page)
+void __delete_from_swap_cache_shadow(struct page *page, void *shadow)
 {
 	struct address_space *address_space;
 	int i, nr = hpage_nr_pages(page);
@@ -189,13 +211,49 @@ void __delete_from_swap_cache(struct page *page)
 	address_space = swap_address_space(entry);
 	idx = swp_offset(entry);
 	for (i = 0; i < nr; i++) {
-		radix_tree_delete(&address_space->page_tree, idx + i);
+		if (shadow) {
+			struct radix_tree_node *node;
+			void __rcu **slot;
+			void *old = __radix_tree_lookup(&address_space->page_tree,
+						       idx + i, &node, &slot);
+
+			VM_BUG_ON_PAGE(old != page + i, page);
+			if (old == page + i)
+				__radix_tree_replace(&address_space->page_tree, node, slot,
+						     shadow, NULL, NULL);
+		} else
+			radix_tree_delete(&address_space->page_tree, idx + i);
 		set_page_private(page + i, 0);
 	}
 	ClearPageSwapCache(page);
 	address_space->nrpages -= nr;
 	__mod_node_page_state(page_pgdat(page), NR_FILE_PAGES, -nr);
 	ADD_CACHE_INFO(del_total, nr);
+}
+
+void __delete_from_swap_cache(struct page *page)
+{
+	__delete_from_swap_cache_shadow(page, NULL);
+}
+
+/* Drop exceptional entries before their swap slots are recycled. */
+void clear_shadow_from_swap_cache(int type, unsigned long begin, unsigned long end)
+{
+	while (begin <= end) {
+		swp_entry_t entry = swp_entry(type, begin);
+		struct address_space *mapping = swap_address_space(entry);
+		unsigned long last = min(end, begin | (SWAP_ADDRESS_SPACE_PAGES - 1UL));
+		unsigned long flags;
+
+		spin_lock_irqsave(&mapping->tree_lock, flags);
+		for (; begin <= last; begin++) {
+			void *old = radix_tree_lookup(&mapping->page_tree, begin);
+
+			if (old && radix_tree_exceptional_entry(old))
+				radix_tree_delete_item(&mapping->page_tree, begin, old);
+		}
+		spin_unlock_irqrestore(&mapping->tree_lock, flags);
+	}
 }
 
 /**
@@ -379,6 +437,7 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 {
 	struct page *found_page, *new_page = NULL;
 	struct address_space *swapper_space = swap_address_space(entry);
+	void *shadow = NULL;
 	int err;
 	*new_page_allocated = false;
 
@@ -441,13 +500,17 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		/* May fail (-ENOMEM) if radix-tree node allocation failed. */
 		__SetPageLocked(new_page);
 		__SetPageSwapBacked(new_page);
-		err = __add_to_swap_cache(new_page, entry);
+		err = add_to_swap_cache_shadow(new_page, entry, &shadow);
 		if (likely(!err)) {
 			radix_tree_preload_end();
 			/*
 			 * Initiate read into locked page and return.
 			 */
-			SetPageWorkingset(new_page);
+			if (lru_gen_enabled()) {
+				if (shadow)
+					workingset_refault(new_page, shadow);
+			} else
+				SetPageWorkingset(new_page);
 			lru_cache_add_anon(new_page);
 			*new_page_allocated = true;
 			return new_page;

@@ -899,6 +899,9 @@ struct task_struct {
 #ifndef TIF_RESTORE_SIGMASK
 	unsigned			restore_sigmask:1;
 #endif
+#ifdef CONFIG_LRU_GEN
+	unsigned			in_lru_fault:1;
+#endif
 #ifdef CONFIG_MEMCG
 	unsigned			in_user_fault:1;
 #ifndef CONFIG_SLOB

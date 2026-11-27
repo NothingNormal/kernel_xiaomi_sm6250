@@ -901,3 +901,21 @@ config OPLUS_MM_HACKS
 	  Tested on devices made by OEMs like Motorola and Samsung.
 
 	  If unsure, say "n".
+
+config LRU_GEN
+	bool "Multi-Gen LRU"
+	depends on MMU && ARM64
+	help
+	  Multi-generational LRU page reclaim adapted from Android Common 5.10.
+
+config LRU_GEN_ENABLED
+	bool "Enable by default"
+	depends on LRU_GEN
+	help
+	  Enable multi-gen LRU by default rather than via the runtime switch.
+
+config LRU_GEN_STATS
+	bool "Full stats for debugging"
+	depends on LRU_GEN
+	help
+	  Keep historical statistics for evicted generations.

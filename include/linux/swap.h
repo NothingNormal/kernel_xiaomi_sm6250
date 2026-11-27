@@ -128,6 +128,9 @@ union swap_header {
  */
 struct reclaim_state {
 	unsigned long reclaimed_slab;
+#ifdef CONFIG_LRU_GEN
+	struct lru_gen_mm_walk *mm_walk;
+#endif
 };
 
 #ifdef __KERNEL__
@@ -410,6 +413,8 @@ extern int add_to_swap(struct page *page);
 extern int add_to_swap_cache(struct page *, swp_entry_t, gfp_t);
 extern int __add_to_swap_cache(struct page *page, swp_entry_t entry);
 extern void __delete_from_swap_cache(struct page *);
+extern void __delete_from_swap_cache_shadow(struct page *page, void *shadow);
+extern void clear_shadow_from_swap_cache(int type, unsigned long begin, unsigned long end);
 extern void delete_from_swap_cache(struct page *);
 extern void free_page_and_swap_cache(struct page *);
 extern void free_pages_and_swap_cache(struct page **, int);
@@ -564,6 +569,14 @@ static inline int add_to_swap_cache(struct page *page, swp_entry_t entry,
 }
 
 static inline void __delete_from_swap_cache(struct page *page)
+{
+}
+
+static inline void __delete_from_swap_cache_shadow(struct page *page, void *shadow)
+{
+}
+
+static inline void clear_shadow_from_swap_cache(int type, unsigned long begin, unsigned long end)
 {
 }
 
