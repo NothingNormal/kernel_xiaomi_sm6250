@@ -262,14 +262,13 @@ static int aw8624_i2c_write_bits(struct aw8624 *aw8624,
 				 unsigned char reg_data)
 {
 	unsigned char reg_val = 0;
-	int ret;
 
-	ret = aw8624_i2c_read(aw8624, reg_addr, &reg_val);
-	if (ret < 0)
-		return ret;
+	aw8624_i2c_read(aw8624, reg_addr, &reg_val);
 	reg_val &= mask;
 	reg_val |= reg_data;
-	return aw8624_i2c_write(aw8624, reg_addr, reg_val);
+	aw8624_i2c_write(aw8624, reg_addr, reg_val);
+
+	return 0;
 }
 
 static int aw8624_i2c_writes(struct aw8624 *aw8624,
@@ -289,10 +288,8 @@ static int aw8624_i2c_writes(struct aw8624 *aw8624,
 	memcpy(&data[1], buf, len);
 
 	ret = i2c_master_send(aw8624->i2c, data, len + 1);
-	if (ret < 0 || (unsigned int)ret != len + 1) {
-		pr_err("%s: i2c master send error: %d\n", __func__, ret);
-		if (ret >= 0)
-			ret = -EIO;
+	if (ret < 0) {
+		pr_err("%s: i2c master send error\n", __func__);
 	}
 
 	kfree(data);
@@ -305,8 +302,46 @@ static int aw8624_i2c_writes(struct aw8624 *aw8624,
  * ram update    FYI:To pass the jens
  *
  *****************************************************/
-/* RTP firmware is loaded on demand by the playback worker. */
+static void aw8624_rtp_loaded(const struct firmware *cont, void *context)
+{
+	struct aw8624 *aw8624 = context;
+	pr_debug("%s enter\n", __func__);
 
+	if (!cont) {
+		pr_err("%s: failed to read %s\n", __func__,
+		       aw8624_rtp_name[aw8624->rtp_file_num]);
+		release_firmware(cont);
+		return;
+	}
+
+	pr_info("%s: loaded %s - size: %zu\n", __func__,
+		aw8624_rtp_name[aw8624->rtp_file_num], cont ? cont->size : 0);
+
+	/* aw8624 rtp update */
+	aw8624_rtp = vmalloc(cont->size + sizeof(int));
+	if (!aw8624_rtp) {
+		release_firmware(cont);
+		pr_err("%s: Error allocating memory\n", __func__);
+		return;
+	}
+	aw8624_rtp->len = cont->size;
+	pr_info("%s: rtp size = %d\n", __func__, aw8624_rtp->len);
+	memcpy(aw8624_rtp->data, cont->data, cont->size);
+	release_firmware(cont);
+
+	aw8624->rtp_init = 1;
+	pr_info("%s: rtp update complete\n", __func__);
+}
+
+static int aw8624_rtp_update(struct aw8624 *aw8624)
+{
+	pr_debug("%s enter\n", __func__);
+
+	return request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
+				       aw8624_rtp_name[aw8624->rtp_file_num],
+				       aw8624->dev, GFP_KERNEL, aw8624,
+				       aw8624_rtp_loaded);
+}
 
 static void aw8624_container_update(struct aw8624 *aw8624,
 				    struct aw8624_container *aw8624_cont)
@@ -397,11 +432,6 @@ static void aw8624_ram_loaded(const struct firmware *cont, void *context)
 	   }
 	 */
 
-	if (cont->size < 4) {
-		release_firmware(cont);
-		return;
-	}
-
 	/* check sum */
 	for (i = 2; i < cont->size; i++) {
 		check_sum += cont->data[i];
@@ -410,7 +440,6 @@ static void aw8624_ram_loaded(const struct firmware *cont, void *context)
 	    (unsigned short)((cont->data[0] << 8) | (cont->data[1]))) {
 		pr_err("%s: check sum err: check_sum=0x%04x\n", __func__,
 		       check_sum);
-		release_firmware(cont);
 		return;
 	} else {
 		pr_info("%s: check sum pass : 0x%04x\n", __func__, check_sum);
@@ -439,6 +468,7 @@ static void aw8624_ram_loaded(const struct firmware *cont, void *context)
 
 	//aw8624_haptic_trig_enable_config(aw8624);
 
+	aw8624_rtp_update(aw8624);
 }
 
 static int aw8624_ram_update(struct aw8624 *aw8624)
@@ -592,8 +622,9 @@ static int aw8624_haptic_stop_delay(struct aw8624 *aw8624)
 		aw8624_i2c_read(aw8624, AW8624_REG_GLB_STATE, &reg_val);
 		if ((reg_val & 0x0f) == 0x00) {
 			return 0;
+
+			msleep(2);
 		}
-		msleep(2);
 		pr_debug("%s wait for standby, reg glb_state=0x%02x\n",
 			 __func__, reg_val);
 	}
@@ -1011,7 +1042,6 @@ static int aw8624_haptic_rtp_init(struct aw8624 *aw8624)
 	pr_debug("%s enter\n", __func__);
 	pm_qos_add_request(&pm_qos_req_vb, PM_QOS_CPU_DMA_LATENCY,
 			   PM_QOS_VALUE_VB);
-	mutex_lock(&aw8624->rtp_lock);
 	aw8624->rtp_cnt = 0;
 	while ((!aw8624_haptic_rtp_get_fifo_afi(aw8624)) &&
 	       (aw8624->play_mode == AW8624_HAPTIC_RTP_MODE) &&
@@ -1029,24 +1059,20 @@ static int aw8624_haptic_rtp_init(struct aw8624 *aw8624)
 		} else {
 			buf_len = (aw8624->ram.base_addr >> 2);
 		}
-		if (!buf_len || aw8624_i2c_writes(aw8624, AW8624_REG_RTP_DATA,
-				  &aw8624_rtp->data[aw8624->rtp_cnt], buf_len) < 0) {
-			aw8624->rtp_init = 0;
-			pm_relax(aw8624->dev);
-			break;
-		}
+		aw8624_i2c_writes(aw8624, AW8624_REG_RTP_DATA,
+				  &aw8624_rtp->data[aw8624->rtp_cnt], buf_len);
 		aw8624->rtp_cnt += buf_len;
 		if (aw8624->rtp_cnt == aw8624_rtp->len) {
 			pr_info("%s: rtp update complete\n", __func__);
-			aw8624->rtp_init = 0;
+			aw8624->rtp_cnt = 0;
 			break;
 		}
 	}
 
-	if (aw8624->play_mode == AW8624_HAPTIC_RTP_MODE &&
-	    aw8624->rtp_init && !atomic_read(&aw8624->exit_in_rtp_loop))
+	if (aw8624->play_mode == AW8624_HAPTIC_RTP_MODE
+	    && !atomic_read(&aw8624->exit_in_rtp_loop)) {
 		aw8624_haptic_set_rtp_aei(aw8624, true);
-	mutex_unlock(&aw8624->rtp_lock);
+	}
 
 	pr_info("%s exit\n", __func__);
 	pm_qos_remove_request(&pm_qos_req_vb);
@@ -1349,28 +1375,36 @@ static void aw8624_rtp_work_routine(struct work_struct *work)
 
 	pr_debug("%s enter\n", __func__);
 
+	if ((aw8624->effect_id < aw8624->info.effect_id_boundary) &&
+	    (aw8624->effect_id > aw8624->info.effect_max))
+		return;
 	VIB_DEBUG("effect_id =%d state=%d", aw8624->effect_id, aw8624->state);
 
 	mutex_lock(&aw8624->lock);
 	aw8624_haptic_upload_lra(aw8624, OSC_CALI);
 	aw8624_haptic_set_rtp_aei(aw8624, false);
 	aw8624_interrupt_clear(aw8624);
-	/* Stop FIFO refill and drain the threaded IRQ before changing buffers. */
+	//wait for irq to exit
 	atomic_set(&aw8624->exit_in_rtp_loop, 1);
-	if (!(aw8624->flags & AW8624_FLAG_SKIP_INTERRUPTS))
-		synchronize_irq(gpio_to_irq(aw8624->irq_gpio));
-	aw8624->rtp_init = 0;
-	aw8624_haptic_stop(aw8624);
-	atomic_set(&aw8624->exit_in_rtp_loop, 0);
-	wake_up_interruptible(&aw8624->stop_wait_q);
-
-	if (aw8624->state) {
-		if (aw8624->effect_id < aw8624->info.effect_id_boundary ||
-		    aw8624->effect_id > aw8624->info.effect_max) {
-			pm_relax(aw8624->dev);
+	while (atomic_read(&aw8624->is_in_rtp_loop)) {
+		pr_info("%s  goint to waiting irq exit\n", __func__);
+		ret =
+		    wait_event_interruptible(aw8624->wait_q,
+					     atomic_read(&aw8624->is_in_rtp_loop) == 0);
+		pr_info("%s  wakeup \n", __func__);
+	if (ret == -ERESTARTSYS) {
+			atomic_set(&aw8624->exit_in_rtp_loop, 0);
+			wake_up_interruptible(&aw8624->stop_wait_q);
 			mutex_unlock(&aw8624->lock);
+			pr_err("%s wake up by signal return erro\n", __func__);
 			return;
 		}
+	}
+	atomic_set(&aw8624->exit_in_rtp_loop, 0);
+	wake_up_interruptible(&aw8624->stop_wait_q);
+	aw8624_haptic_stop(aw8624);
+
+	if (aw8624->state) {
 		pm_stay_awake(aw8624->dev);
 		aw8624_haptic_effect_strength(aw8624);
 		aw8624->rtp_file_num = aw8624->effect_id - 20;
@@ -1393,14 +1427,12 @@ static void aw8624_rtp_work_routine(struct work_struct *work)
 			mutex_unlock(&aw8624->lock);
 			return;
 		}
-		mutex_lock(&aw8624->rtp_lock);
 		aw8624->rtp_init = 0;
 		vfree(aw8624_rtp);
 		aw8624_rtp = vmalloc(rtp_file->size + sizeof(int));
 		if (!aw8624_rtp) {
 			release_firmware(rtp_file);
 			pr_err("%s: error allocating memory\n", __func__);
-			mutex_unlock(&aw8624->rtp_lock);
 			pm_relax(aw8624->dev);
 			mutex_unlock(&aw8624->lock);
 			return;
@@ -1412,7 +1444,6 @@ static void aw8624_rtp_work_routine(struct work_struct *work)
 		release_firmware(rtp_file);
 
 		aw8624->rtp_init = 1;
-		mutex_unlock(&aw8624->rtp_lock);
 
 
 
@@ -2163,6 +2194,11 @@ static int aw8624_vibrator_init(struct aw8624 *aw8624)
 	INIT_WORK(&aw8624->vibrator_work, aw8624_vibrator_work_routine);
 	INIT_WORK(&aw8624->rtp_work, aw8624_rtp_work_routine);
 
+	mutex_init(&aw8624->lock);
+	atomic_set(&aw8624->is_in_rtp_loop, 0);
+	atomic_set(&aw8624->exit_in_rtp_loop, 0);
+	init_waitqueue_head(&aw8624->wait_q);
+	init_waitqueue_head(&aw8624->stop_wait_q);
 
 	return 0;
 }
@@ -2232,22 +2268,18 @@ static irqreturn_t aw8624_irq(int irq, void *data)
 	}
 	if (reg_val & AW8624_BIT_SYSINT_DONEI) {
 		VIB_DEBUG("chip playback done");
-		if (aw8624->play_mode == AW8624_HAPTIC_RTP_MODE)
-			pm_relax(aw8624->dev);
 	}
 
 	if (reg_val & AW8624_BIT_SYSINT_FF_AEI) {
 		VIB_DEBUG("aw8624 rtp fifo almost empty int");
 		if (aw8624->rtp_init) {
 			while ((!aw8624_haptic_rtp_get_fifo_afi(aw8624)) &&
-			       (aw8624->play_mode == AW8624_HAPTIC_RTP_MODE) &&
-			       !atomic_read(&aw8624->exit_in_rtp_loop)) {
+			       (aw8624->play_mode == AW8624_HAPTIC_RTP_MODE) && !atomic_read(&aw8624->exit_in_irq)) {
 				mutex_lock(&aw8624->rtp_lock);
 				VIB_DEBUG
 				    ("aw8624 rtp mode fifo update, cnt=%d",
 				     aw8624->rtp_cnt);
-				if (!aw8624_rtp || !aw8624->rtp_init ||
-				    atomic_read(&aw8624->exit_in_rtp_loop)) {
+				if (!aw8624_rtp) {
 					VIB_DEBUG("aw8624_rtp is null break");
 					mutex_unlock(&aw8624->rtp_lock);
 					break;
@@ -2259,15 +2291,9 @@ static irqreturn_t aw8624_irq(int irq, void *data)
 				} else {
 					buf_len = (aw8624->ram.base_addr >> 2);
 				}
-				if (!buf_len || aw8624_i2c_writes(aw8624,
-					AW8624_REG_RTP_DATA,
-					&aw8624_rtp->data[aw8624->rtp_cnt], buf_len) < 0) {
-					aw8624->rtp_init = 0;
-					aw8624_haptic_set_rtp_aei(aw8624, false);
-					mutex_unlock(&aw8624->rtp_lock);
-					pm_relax(aw8624->dev);
-					break;
-				}
+				aw8624_i2c_writes(aw8624, AW8624_REG_RTP_DATA,
+						  &aw8624_rtp->data[aw8624->rtp_cnt],
+						  buf_len);
 				aw8624->rtp_cnt += buf_len;
 				if (aw8624->rtp_cnt == aw8624_rtp->len) {
 					VIB_DEBUG("rtp update complete");
@@ -2635,11 +2661,15 @@ static int aw8624_haptics_upload_effect(struct input_dev *dev,
 	while (atomic_read(&aw8624->exit_in_rtp_loop)) {
 		pr_info("goint to waiting rtp  exit\n");
 		mutex_unlock(&aw8624->lock);
-		ret = wait_event_interruptible_timeout(aw8624->stop_wait_q,
-				!atomic_read(&aw8624->exit_in_rtp_loop),
-				msecs_to_jiffies(1000));
-		if (ret <= 0)
-			return ret ? ret : -ETIMEDOUT;
+		ret =
+		    wait_event_interruptible(aw8624->stop_wait_q,
+					     atomic_read(&aw8624-> exit_in_rtp_loop) == 0);
+		pr_info("%s  wakeup \n", __func__);
+		if (ret == -ERESTARTSYS) {
+			mutex_unlock(&aw8624->lock);
+			pr_err("%s wake up by signal return erro\n", __func__);
+	return ret;
+	}
 		mutex_lock(&aw8624->lock);
 	}
 	if (aw8624->effect_type == FF_CONSTANT) {
@@ -2671,13 +2701,10 @@ static int aw8624_haptics_upload_effect(struct input_dev *dev,
 			  aw8624->play.vmax_mv);
 
 		if (aw8624->effect_id < 0 ||
-		    aw8624->effect_id > aw8624->info.effect_max ||
-		    (aw8624->effect_id < aw8624->info.effect_id_boundary &&
-		     aw8624->effect_id >= aw8624->effects_count) ||
-		    aw8624->effect_id >= ARRAY_SIZE(aw8624->info.rtp_time)) {
+		    aw8624->effect_id > aw8624->info.effect_max) {
 			mutex_unlock(&aw8624->lock);
-			return -EINVAL;
-		}
+			return 0;
+	}
 
 		if (aw8624->effect_id < aw8624->info.effect_id_boundary) {
 			aw8624->activate_mode = AW8624_HAPTIC_ACTIVATE_RAM_MODE;
@@ -2750,9 +2777,12 @@ static int aw8624_haptics_playback(struct input_dev *dev, int effect_id,
 	} else if (aw8624->effect_type == FF_PERIODIC &&
 		   aw8624->activate_mode == AW8624_HAPTIC_ACTIVATE_RTP_MODE) {
 		VIB_DEBUG("enter  rtp_mode");
-		if (val <= 0)
-			atomic_set(&aw8624->exit_in_rtp_loop, 1);
+		//schedule_work(&aw8624->rtp_work);
 		queue_work(aw8624->work_queue, &aw8624->rtp_work);
+		//if we are in the play mode, force to exit
+		if (val == 0) {
+			atomic_set(&aw8624->exit_in_rtp_loop, 1);
+		}
 	} else {
 		/*other mode */
 	}
@@ -3958,12 +3988,6 @@ aw8624_i2c_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
 
 	aw8624->dev = &i2c->dev;
 	aw8624->i2c = i2c;
-	mutex_init(&aw8624->lock);
-	mutex_init(&aw8624->rtp_lock);
-	atomic_set(&aw8624->is_in_irq, 0);
-	atomic_set(&aw8624->exit_in_rtp_loop, 0);
-	init_waitqueue_head(&aw8624->wait_q);
-	init_waitqueue_head(&aw8624->stop_wait_q);
 
 	device_init_wakeup(aw8624->dev, true);
 	i2c_set_clientdata(i2c, aw8624);
