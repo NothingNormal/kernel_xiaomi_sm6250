@@ -441,8 +441,8 @@ static void request_wait_answer(struct fuse_conn *fc, struct fuse_req *req)
 	int err;
 
 	if (!fc->no_interrupt) {
-		/* Any signal may interrupt this */
-		err = wait_event_interruptible(req->waitq,
+		/* Any signal may interrupt this; allow suspend to freeze us. */
+		err = wait_event_freezable(req->waitq,
 					test_bit(FR_FINISHED, &req->flags));
 		if (!err)
 			return;
