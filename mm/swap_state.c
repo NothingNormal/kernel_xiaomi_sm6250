@@ -239,6 +239,9 @@ void __delete_from_swap_cache(struct page *page)
 /* Drop exceptional entries before their swap slots are recycled. */
 void clear_shadow_from_swap_cache(int type, unsigned long begin, unsigned long end)
 {
+	if (!IS_ENABLED(CONFIG_LRU_GEN))
+		return;
+
 	while (begin <= end) {
 		swp_entry_t entry = swp_entry(type, begin);
 		struct address_space *mapping = swap_address_space(entry);
@@ -246,13 +249,31 @@ void clear_shadow_from_swap_cache(int type, unsigned long begin, unsigned long e
 		unsigned long flags;
 
 		spin_lock_irqsave(&mapping->tree_lock, flags);
-		for (; begin <= last; begin++) {
+		if (begin == last) {
 			void *old = radix_tree_lookup(&mapping->page_tree, begin);
 
 			if (old && radix_tree_exceptional_entry(old))
 				radix_tree_delete_item(&mapping->page_tree, begin, old);
+		} else {
+			struct radix_tree_iter iter;
+			void __rcu **slot;
+
+			/* Visit populated slots only, never outside the freed range. */
+			radix_tree_for_each_slot(slot, &mapping->page_tree, &iter, begin) {
+				void *item;
+
+				if (iter.index > last)
+					break;
+				item = radix_tree_deref_slot_protected(slot, &mapping->tree_lock);
+				if (item && radix_tree_exceptional_entry(item))
+					radix_tree_iter_delete(&mapping->page_tree, &iter, slot);
+			}
 		}
 		spin_unlock_irqrestore(&mapping->tree_lock, flags);
+
+		if (last == end)
+			break;
+		begin = last + 1;
 	}
 }
 

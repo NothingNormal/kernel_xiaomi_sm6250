@@ -2970,6 +2970,9 @@ static bool should_skip_mm(struct mm_struct *mm, struct lru_gen_mm_walk *walk)
 	struct pglist_data *pgdat = lruvec_pgdat(walk->lruvec);
 	int key = pgdat->node_id % BITS_PER_TYPE(mm->lru_gen.bitmap);
 
+	if (mm_is_oom_victim(mm))
+		return true;
+
 	if (!walk->force_scan && !test_bit(key, &mm->lru_gen.bitmap))
 		return true;
 
@@ -3728,32 +3731,46 @@ static void walk_mm(struct lruvec *lruvec, struct mm_struct *mm, struct lru_gen_
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
+	int key = pgdat->node_id % BITS_PER_TYPE(mm->lru_gen.bitmap);
+
 	walk->next_addr = FIRST_USER_ADDRESS;
 
 	do {
-		err = -EBUSY;
+		unsigned long start = walk->next_addr;
+		unsigned long end;
 
-		/* page_update_gen() requires stable page_memcg() */
-		if (!mem_cgroup_trylock_pages(memcg))
+		if (mm_is_oom_victim(mm))
 			break;
-
-		/* the caller might be holding the lock for write */
-		if (down_read_trylock(&mm->mmap_sem)) {
-			err = walk_page_range(walk->next_addr, ULONG_MAX, &legacy_walk);
-
-			up_read(&mm->mmap_sem);
+#ifdef CONFIG_MEMCG
+		if (READ_ONCE(mm->lru_gen.memcg) != memcg)
+			break;
+#endif
+		/* page_update_gen() requires stable page_memcg() */
+		if (!mem_cgroup_trylock_pages(memcg)) {
+			set_bit(key, &mm->lru_gen.bitmap);
+			break;
 		}
 
-		mem_cgroup_unlock_pages();
+		err = -EBUSY;
+		/* Never wait for mmap_sem during reclaim. */
+		if (down_read_trylock(&mm->mmap_sem)) {
+			end = min(mm->highest_vm_end, mm->task_size);
+			err = start < end ? walk_page_range(start, end, &legacy_walk) : 0;
+			up_read(&mm->mmap_sem);
+		} else {
+			set_bit(key, &mm->lru_gen.bitmap);
+		}
 
+		/* Publish promotions before releasing charge-migration exclusion. */
 		if (walk->batched) {
 			spin_lock_irq(&pgdat->lru_lock);
 			reset_batch_size(lruvec, walk);
 			spin_unlock_irq(&pgdat->lru_lock);
 		}
+		mem_cgroup_unlock_pages();
 
 		cond_resched();
-	} while (err == -EAGAIN);
+	} while (err == -EAGAIN && walk->next_addr);
 }
 
 static struct lru_gen_mm_walk *set_mm_walk(struct pglist_data *pgdat)
@@ -4167,6 +4184,9 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 
 	/* avoid taking the LRU lock under the PTL when possible */
 	walk = current->reclaim_state ? current->reclaim_state->mm_walk : NULL;
+	/* Do not charge neighboring pages to an unrelated reclaim batch. */
+	if (walk && walk->lruvec != lruvec)
+		walk = NULL;
 
 	start = max(pvmw->address & PMD_MASK, pvmw->vma->vm_start);
 	end = min(pvmw->address | ~PMD_MASK, pvmw->vma->vm_end - 1) + 1;
@@ -4562,6 +4582,12 @@ static int evict_pages(struct lruvec *lruvec, struct scan_control *sc, int swapp
 	if (list_empty(&list))
 		return scanned;
 
+	/* rmap promotions during eviction must use this lruvec's batch. */
+	walk = current->reclaim_state->mm_walk;
+	if (walk) {
+		walk->lruvec = lruvec;
+		walk->can_swap = swappiness != 0;
+	}
 	reclaimed = shrink_page_list(&list, pgdat, sc, 0, &stat, false);
 
 	list_for_each_entry(page, &list, lru) {

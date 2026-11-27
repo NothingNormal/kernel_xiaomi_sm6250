@@ -224,19 +224,22 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
 
 static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bool reclaiming)
 {
-	unsigned long flags;
-	int gen = page_lru_gen(page);
+	unsigned long old, new;
+	int gen;
 
-	if (gen < 0)
-		return false;
+	/* Derive PG_active from the generation actually removed by cmpxchg. */
+	do {
+		old = READ_ONCE(page->flags);
+		gen = ((old & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
+		if (gen < 0)
+			return false;
 
-	VM_WARN_ON_ONCE_PAGE(PageActive(page), page);
-	VM_WARN_ON_ONCE_PAGE(PageUnevictable(page), page);
-
-	/* for migrate_page_states() */
-	flags = !reclaiming && lru_gen_is_active(lruvec, gen) ? BIT(PG_active) : 0;
-	flags = lru_gen_set_mask_bits(&page->flags, LRU_GEN_MASK, flags);
-	gen = ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
+		VM_WARN_ON_ONCE_PAGE(old & BIT(PG_active), page);
+		VM_WARN_ON_ONCE_PAGE(old & BIT(PG_unevictable), page);
+		new = old & ~(LRU_GEN_MASK | BIT(PG_active));
+		if (!reclaiming && lru_gen_is_active(lruvec, gen))
+			new |= BIT(PG_active);
+	} while (cmpxchg(&page->flags, old, new) != old);
 
 	lru_gen_update_size(lruvec, page, gen, -1);
 	list_del(&page->lru);
