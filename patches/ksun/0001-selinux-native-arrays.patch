@@ -1,0 +1,57 @@
+diff --git a/kernel/selinux/sepolicy.c b/kernel/selinux/sepolicy.c
+--- a/kernel/selinux/sepolicy.c
++++ b/kernel/selinux/sepolicy.c
+@@ -194,7 +194,7 @@
+ 
+     for (i = 0; i < db->te_avtab.nslot; i++) {
+         prev = NULL;
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(KSU_SEPOL_HAS_NATIVE_ARRAYS)
+         for (n = db->te_avtab.htable[i]; n; prev = n, n = n->next) {
+ #else
+         for (n = flex_array_get_ptr(db->te_avtab.htable, i); n;
+@@ -206,7 +206,7 @@
+             if (prev)
+                 prev->next = n->next;
+             else {
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(KSU_SEPOL_HAS_NATIVE_ARRAYS)
+                 db->te_avtab.htable[i] = n->next;
+ #else
+                 flex_array_put_ptr(db->te_avtab.htable, i, n->next,
+@@ -226,7 +226,7 @@
+                 // data is u32
+                 shrink_size += sizeof(n->datum.u.data);
+             n->next = NULL;
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(KSU_SEPOL_HAS_NATIVE_ARRAYS)
+             removed.htable[0] = n;
+ #else
+             flex_array_put_ptr(removed.htable, 0, n, GFP_ATOMIC | __GFP_ZERO);
+@@ -787,7 +787,7 @@
+         kfree(type);
+         return false;
+     }
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(KSU_SEPOL_HAS_NATIVE_ARRAYS)
+     /*
+      * Grow the arrays before touching the symtab or nprim. kvrealloc() frees
+      * the old block on success, so store each pointer in db right away: a
+@@ -838,7 +838,7 @@
+ 
+     db->p_types.nprim = value;
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(KSU_SEPOL_HAS_NATIVE_ARRAYS)
+     ebitmap_init(&db->type_attr_map_array[value - 1]);
+     ebitmap_set_bit(&db->type_attr_map_array[value - 1], value - 1, 1);
+ 
+@@ -1044,7 +1044,7 @@
+ static void add_typeattribute_raw(struct policydb *db, struct type_datum *type,
+                                   struct type_datum *attr)
+ {
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(KSU_SEPOL_HAS_NATIVE_ARRAYS)
+     struct ebitmap *sattr = &db->type_attr_map_array[type->value - 1];
+ 
+ #elif defined(CONFIG_IS_HW_HISI)

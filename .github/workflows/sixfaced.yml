@@ -33,6 +33,7 @@ jobs:
           git submodule update --init --recursive KernelSU-Next
           test -f drivers/kernelsu/Kbuild
           git -C KernelSU-Next describe --tags --always
+          bash scripts/prepare-ksun.sh
       - name: Install latest Neutron Clang
         run: |
           set -euo pipefail
@@ -53,7 +54,7 @@ jobs:
           set -euo pipefail
           args=(ARCH=arm64 O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
                 OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-                READELF=llvm-readelf KCFLAGS=-mtune=cortex-a76 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
+                READELF=llvm-readelf "KCFLAGS=-mtune=cortex-a76 -DKSU_SEPOL_HAS_NATIVE_ARRAYS" LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
                 CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-)
           make "${args[@]}" vendor/xiaomi/miatoll_defconfig
           grep -qx 'CONFIG_KSU=y' out/.config
