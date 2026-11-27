@@ -1445,6 +1445,9 @@ struct mm_walk {
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	void *private;
+	/* Optional callback for walkers that handle the lower levels. */
+	int (*p4d_entry)(p4d_t *p4d, unsigned long addr,
+			 unsigned long next, struct mm_walk *walk);
 };
 
 int walk_page_range(unsigned long addr, unsigned long end,
