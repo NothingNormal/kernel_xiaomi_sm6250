@@ -2,6 +2,8 @@ name: SixFaced miatoll kernel
 on:
   push:
     branches: [KSUN]
+  pull_request:
+    branches: [KSUN]
   workflow_dispatch:
 
 permissions:

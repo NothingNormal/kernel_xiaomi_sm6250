@@ -31,7 +31,11 @@
 #include "internal.h"
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
+#include <linux/jump_label.h>
 extern bool susfs_is_current_ksu_domain(void);
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+DECLARE_STATIC_KEY_TRUE(susfs_is_sdcard_android_data_not_decrypted);
+#endif
 #endif
 
 /* Maximum number of mounts in a mount namespace */
