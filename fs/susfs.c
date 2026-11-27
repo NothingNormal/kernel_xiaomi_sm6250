@@ -1001,11 +1001,11 @@ out_copy_to_user:
 /* spoof_cmdline_or_bootconfig */
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
 static char *fake_cmdline_or_bootconfig = NULL;
-DEFINE_STATIC_KEY_FALSE(susfs_is_fake_cmdline_or_bootconfig_buffer_set);
+DEFINE_STATIC_KEY_FALSE(susfs_fake_cmdline_or_bootconfig_key);
 
 bool susfs_is_fake_cmdline_or_bootconfig_buffer_set(void)
 {
-	return static_key_enabled(&susfs_is_fake_cmdline_or_bootconfig_buffer_set);
+	return static_key_enabled(&susfs_fake_cmdline_or_bootconfig_key);
 }
 static DEFINE_SEQLOCK(susfs_fake_cmdline_or_bootconfig_seqlock);
 
@@ -1045,8 +1045,8 @@ void susfs_set_cmdline_or_bootconfig(void __user **user_info) {
 			SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE - 1);
 	write_sequnlock(&susfs_fake_cmdline_or_bootconfig_seqlock);
 
-	if (!static_key_enabled(&susfs_is_fake_cmdline_or_bootconfig_buffer_set))
-		static_branch_enable(&susfs_is_fake_cmdline_or_bootconfig_buffer_set);
+	if (!static_key_enabled(&susfs_fake_cmdline_or_bootconfig_key))
+		static_branch_enable(&susfs_fake_cmdline_or_bootconfig_key);
 	SUSFS_LOGI("fake_cmdline_or_bootconfig is set\n");
 
 	info->err = 0;
