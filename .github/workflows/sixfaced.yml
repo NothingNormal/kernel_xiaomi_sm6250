@@ -9,10 +9,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: sixfaced-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-24.04
-    container: ubuntu:26.04
     timeout-minutes: 120
     defaults:
       run:
@@ -20,11 +23,20 @@ jobs:
     steps:
       - name: Install host build tools
         run: |
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            bc bison build-essential ca-certificates ccache curl flex git jq libelf-dev \
-            libssl-dev libncurses-dev lz4 python3 zip unzip zstd xz-utils cpio kmod \
-            gcc-arm-linux-gnueabi gcc-aarch64-linux-gnu device-tree-compiler
+          set -euo pipefail
+          packages=(bc bison build-essential ca-certificates ccache curl flex git jq libelf-dev
+                    libssl-dev libncurses-dev lz4 python3 zip unzip zstd xz-utils cpio kmod
+                    gcc-arm-linux-gnueabi gcc-aarch64-linux-gnu device-tree-compiler)
+          missing=()
+          for pkg in "${packages[@]}"; do
+            if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -qx 'install ok installed'; then
+              missing+=("$pkg")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends "${missing[@]}"
+          fi
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -44,28 +56,45 @@ jobs:
           grep -q 'KSU_IOCTL_SUSFS_CMD' KernelSU-Next/uapi/supercall.h
           grep -q 'KernelSU - SUSFS' KernelSU-Next/kernel/Kconfig
           grep -q 'susfs/susfs_glue.o' KernelSU-Next/kernel/Kbuild
-      - name: Install latest Neutron Clang
+      - name: Resolve latest Neutron Clang
         id: neutron
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tmp=$(mktemp -d)
-          cd "$tmp"
-          curl -fsS --retry 3 \
+          release=$(curl -fsS --retry 3 --connect-timeout 15 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest -o release.json
-          asset=$(jq -ec '[.assets[] | select(.name | test("^neutron-clang-[0-9]+[.]tar[.]zst$"))] | select(length == 1) | first' release.json)
+            https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest)
+          asset=$(jq -ec '[.assets[] | select(.name | test("^neutron-clang-[0-9]+[.]tar[.]zst$"))] | select(length == 1) | first' <<< "$release")
           url=$(jq -er '.browser_download_url' <<< "$asset")
           sha=$(jq -er '.digest | capture("^sha256:(?<hex>[0-9a-f]{64})$").hex' <<< "$asset")
-          curl -fL --retry 3 "$url" -o neutron.tar.zst
-          echo "$sha  neutron.tar.zst" | sha256sum -c -
-          mkdir -p /opt/neutron
-          tar --zstd -xf neutron.tar.zst -C /opt/neutron
-          /opt/neutron/bin/clang --version
-          echo /opt/neutron/bin >> "$GITHUB_PATH"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "digest=$sha" >> "$GITHUB_OUTPUT"
+      - name: Restore Neutron toolchain
+        id: neutron-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/neutron
+          key: neutron-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.neutron.outputs.digest }}
+      - name: Install Neutron Clang if not cached
+        if: steps.neutron-cache.outputs.cache-hit != 'true'
+        env:
+          NEUTRON_URL: ${{ steps.neutron.outputs.url }}
+          NEUTRON_SHA: ${{ steps.neutron.outputs.digest }}
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          curl -fL --retry 3 --connect-timeout 15 "$NEUTRON_URL" -o "$tmp/neutron.tar.zst"
+          echo "$NEUTRON_SHA  $tmp/neutron.tar.zst" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/neutron"
+          tar --zstd -xf "$tmp/neutron.tar.zst" -C "$RUNNER_TEMP/neutron"
+      - name: Activate Neutron Clang
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/neutron/bin/clang" --version
+          echo "$RUNNER_TEMP/neutron/bin" >> "$GITHUB_PATH"
       - name: Restore compiler cache
         uses: actions/cache@v5
         with:
@@ -78,7 +107,7 @@ jobs:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_BASEDIR: ${{ github.workspace }}
           CCACHE_COMPILERCHECK: content
-          CCACHE_MAXSIZE: 2G
+          CCACHE_MAXSIZE: 3G
         run: |
           set -euo pipefail
           ccache --zero-stats
