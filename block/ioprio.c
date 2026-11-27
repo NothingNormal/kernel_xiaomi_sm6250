@@ -61,6 +61,11 @@ int set_task_ioprio(struct task_struct *task, int ioprio)
 }
 EXPORT_SYMBOL_GPL(set_task_ioprio);
 
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+#include <linux/susfs_def.h>
+extern bool susfs_is_priority_uid_filtered(uid_t uid);
+#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+
 SYSCALL_DEFINE3(ioprio_set, int, which, int, who, int, ioprio)
 {
 	int class = IOPRIO_PRIO_CLASS(ioprio);
@@ -120,8 +125,18 @@ SYSCALL_DEFINE3(ioprio_set, int, which, int, who, int, ioprio)
 				break;
 			if (!who)
 				user = current_user();
-			else
+			else {
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+				/*
+				 * - Do not let an app process learn whether a
+				 *   filtered app exists by probing ioprio_set per uid.
+				 */
+				if (current_uid().val >= 10000 &&
+				    susfs_is_priority_uid_filtered(uid.val))
+					break;
+#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
 				user = find_user(uid);
+			}
 
 			if (!user)
 				break;
@@ -213,8 +228,18 @@ SYSCALL_DEFINE2(ioprio_get, int, which, int, who)
 			uid = make_kuid(current_user_ns(), who);
 			if (!who)
 				user = current_user();
-			else
+			else {
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+				/*
+				 * - Do not let an app process learn whether a
+				 *   filtered app exists by probing ioprio_get per uid.
+				 */
+				if (current_uid().val >= 10000 &&
+				    susfs_is_priority_uid_filtered(uid.val))
+					break;
+#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
 				user = find_user(uid);
+			}
 
 			if (!user)
 				break;

@@ -413,6 +413,11 @@ static const struct cred *access_override_creds(void)
 	return old_cred;
 }
 
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+#include <linux/susfs_def.h>
+extern struct filename *susfs_open_redirect_spoof_do_sys_openat(struct inode *inode);
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+
 #ifdef CONFIG_KSU_MANUAL_HOOK
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
 			      int *mode, int *flags);
@@ -1188,6 +1193,32 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 	tmp = getname(filename);
 	if (IS_ERR(tmp))
 		return PTR_ERR(tmp);
+
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	/*
+	 * - OPEN_REDIRECT rewrites the path that is about to be opened, so the
+	 *   call has to happen after getname() and before do_filp_open().
+	 * - The decision is made per inode and per uid scheme, which is why the
+	 *   path has to be resolved once more; a path that does not resolve is
+	 *   left alone and the original open error is reported by
+	 *   do_filp_open() as usual.
+	 */
+	{
+		struct path sus_path;
+		if (!kern_path(tmp->name, 0, &sus_path)) {
+			struct filename *redirected = NULL;
+
+			if (sus_path.dentry->d_inode)
+				redirected = susfs_open_redirect_spoof_do_sys_openat(
+							sus_path.dentry->d_inode);
+			path_put(&sus_path);
+			if (redirected && !IS_ERR(redirected)) {
+				putname(tmp);
+				tmp = redirected;
+			}
+		}
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
 	fd = get_unused_fd_flags(flags);
 	if (fd >= 0) {

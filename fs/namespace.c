@@ -29,6 +29,14 @@
 
 #include "pnode.h"
 #include "internal.h"
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#include <linux/jump_label.h>
+extern bool susfs_is_current_ksu_domain(void);
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+DECLARE_STATIC_KEY_TRUE(susfs_is_sdcard_android_data_not_decrypted);
+#endif
+#endif
 
 /* Maximum number of mounts in a mount namespace */
 unsigned int sysctl_mount_max __read_mostly = 100000;
@@ -1118,6 +1126,17 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
 
 	mnt->mnt.mnt_flags = old->mnt.mnt_flags;
 	mnt->mnt.mnt_flags &= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	/*
+	 * Mounts cloned by the ksu process while /sdcard is still encrypted are
+	 * flagged so that the proc mount interfaces can hide them from the
+	 * non-su processes. The flag uses a bit of mnt_flags that mainline does
+	 * not use and it is cleared again once the mount is detached.
+	 */
+	if (susfs_is_current_ksu_domain() &&
+	    static_branch_likely(&susfs_is_sdcard_android_data_not_decrypted))
+		mnt->mnt.mnt_flags |= VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT;
+#endif
 	/* Don't allow unprivileged users to change mount flags */
 	if (flag & CL_UNPRIVILEGED) {
 		mnt->mnt.mnt_flags |= MNT_LOCK_ATIME;

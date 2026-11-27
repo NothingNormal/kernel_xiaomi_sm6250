@@ -2,6 +2,8 @@ name: SixFaced miatoll kernel
 on:
   push:
     branches: [KSUN]
+  pull_request:
+    branches: [KSUN]
   workflow_dispatch:
 
 permissions:
@@ -37,13 +39,23 @@ jobs:
           test -f drivers/kernelsu/Kbuild
           git -C KernelSU-Next describe --tags --always
           bash scripts/prepare-ksun.sh
+          # SUSFS integration landed: the KernelSU tree must now expose it.
+          test -f KernelSU-Next/kernel/susfs/susfs_glue.c
+          grep -q 'KSU_IOCTL_SUSFS_CMD' KernelSU-Next/uapi/supercall.h
+          grep -q 'KernelSU - SUSFS' KernelSU-Next/kernel/Kconfig
+          grep -q 'susfs/susfs_glue.o' KernelSU-Next/kernel/Kbuild
       - name: Install latest Neutron Clang
         id: neutron
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tmp=$(mktemp -d)
           cd "$tmp"
-          curl -fsSL --retry 3 https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest -o release.json
+          curl -fsS --retry 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest -o release.json
           asset=$(jq -ec '[.assets[] | select(.name | test("^neutron-clang-[0-9]+[.]tar[.]zst$"))] | select(length == 1) | first' release.json)
           url=$(jq -er '.browser_download_url' <<< "$asset")
           sha=$(jq -er '.digest | capture("^sha256:(?<hex>[0-9a-f]{64})$").hex' <<< "$asset")
@@ -79,12 +91,17 @@ jobs:
           grep -qx 'CONFIG_KSU_MANUAL_HOOK=y' out/.config
           grep -qx 'CONFIG_NOMOUNT=y' out/.config
           grep -qx 'CONFIG_KEYS=y' out/.config
+          grep -qx 'CONFIG_KSU_SUSFS=y' out/.config
+          grep -qx 'CONFIG_THREAD_INFO_IN_TASK=y' out/.config
           make -j"$(nproc)" "${args[@]}" Image
           ccache --show-stats
           llvm-nm out/vmlinux > out/vmlinux.symbols
           grep -E " [tT] kernelsu_init$" out/vmlinux.symbols
           grep -E " [tT] ksu_handle_sys_reboot$" out/vmlinux.symbols
           grep -E " [tT] nomount_init$" out/vmlinux.symbols
+          grep -E " [tT] susfs_init$" out/vmlinux.symbols
+          grep -E " [tT] susfs_is_inode_sus_path$" out/vmlinux.symbols
+          grep -E " [tT] ksu_susfs_handle_ioctl$" out/vmlinux.symbols
           scripts/package-sixfaced.sh out/arch/arm64/boot/Image SixFaced.zip
           unzip -tq SixFaced.zip
       - uses: actions/upload-artifact@v5

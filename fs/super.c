@@ -969,10 +969,40 @@ static DEFINE_SPINLOCK(unnamed_dev_lock);/* protects the above */
  */
 static int unnamed_dev_start = 1;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_def.h>
+extern bool susfs_is_current_ksu_domain(void);
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+
 int get_anon_bdev(dev_t *p)
 {
 	int dev;
 	int error;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	/*
+	 * - Allocate the anonymous device numbers of the filesystems that the
+	 *   ksu process mounts before /sdcard is decrypted from a separate minor
+	 *   range, so that they never interleave with the real ones and the
+	 *   minor numbers of the stock mounts stay contiguous.
+	 * - The range is exclusive, a failure here is reported to the caller as
+	 *   EMFILE just like an exhausted ida would be, the kernel does not fall
+	 *   back to the normal range (that would defeat the point).
+	 */
+	if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted) &&
+	    susfs_is_current_ksu_domain()) {
+		dev = ida_alloc_range(&unnamed_dev_ida, DEFAULT_KSU_MNT_MINOR_DEV,
+				      (1 << MINORBITS) - 1, GFP_ATOMIC);
+		if (dev == -ENOSPC)
+			return -EMFILE;
+		if (dev < 0)
+			return dev;
+
+		*p = MKDEV(0, dev);
+		return 0;
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
  retry:
 	if (ida_pre_get(&unnamed_dev_ida, GFP_ATOMIC) == 0)

@@ -17,6 +17,12 @@
 
 #include "pnode.h"
 #include "internal.h"
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_def.h>
+#include <linux/susfs_mount.h>
+extern bool susfs_is_current_ksu_domain(void);
+extern struct static_key_false susfs_is_hide_sus_mnts_for_non_su_procs_enabled;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
 static unsigned mounts_poll(struct file *file, poll_table *wait)
 {
@@ -94,8 +100,33 @@ static void show_type(struct seq_file *m, struct super_block *sb)
 	}
 }
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+/*
+ * - The mounts that the ksu process created before /sdcard was decrypted are
+ *   hidden from every non-su process, so that they do not show up in
+ *   /proc/[self|pid]/[mounts|mountinfo|mountstats] and leave no gap in the
+ *   mnt_id/mnt_group_id space that an app could detect.
+ * - The su process (and root) keeps seeing them, that is what KernelSU and the
+ *   module installers rely on.
+ */
+static bool susfs_should_hide_sus_mnts_for_current(void)
+{
+	if (likely(!static_branch_unlikely(&susfs_is_hide_sus_mnts_for_non_su_procs_enabled)))
+		return false;
+
+	return !susfs_is_current_ksu_domain();
+}
+#define SUSFS_HIDDEN_MNT_RET SEQ_SKIP
+#else
+#define SUSFS_HIDDEN_MNT_RET 0
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+
 static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)
 {
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	if (susfs_is_sus_mnt(mnt) && susfs_should_hide_sus_mnts_for_current())
+		return SUSFS_HIDDEN_MNT_RET;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	struct proc_mounts *p = m->private;
 	struct mount *r = real_mount(mnt);
 	struct path mnt_path = { .dentry = mnt->mnt_root, .mnt = mnt };
@@ -132,6 +163,10 @@ out:
 
 static int show_mountinfo(struct seq_file *m, struct vfsmount *mnt)
 {
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	if (susfs_is_sus_mnt(mnt) && susfs_should_hide_sus_mnts_for_current())
+		return SUSFS_HIDDEN_MNT_RET;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	struct proc_mounts *p = m->private;
 	struct mount *r = real_mount(mnt);
 	struct super_block *sb = mnt->mnt_sb;
@@ -196,6 +231,10 @@ out:
 
 static int show_vfsstat(struct seq_file *m, struct vfsmount *mnt)
 {
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	if (susfs_is_sus_mnt(mnt) && susfs_should_hide_sus_mnts_for_current())
+		return SUSFS_HIDDEN_MNT_RET;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	struct proc_mounts *p = m->private;
 	struct mount *r = real_mount(mnt);
 	struct path mnt_path = { .dentry = mnt->mnt_root, .mnt = mnt };

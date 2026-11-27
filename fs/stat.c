@@ -66,10 +66,21 @@ EXPORT_SYMBOL(generic_fillattr);
  * filehandle lookup code, which uses only the inode number and returns no
  * attributes to any user.  Any other code probably wants vfs_getattr.
  */
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+#include <linux/susfs_def.h>
+extern bool susfs_is_inode_sus_kstat(struct inode *inode, bool *out_is_fuse);
+extern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode,
+						   struct kstat *stat,
+						   u32 result_mask);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+
 int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 		      u32 request_mask, unsigned int query_flags)
 {
 	struct inode *inode = d_backing_inode(path->dentry);
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	bool is_fuse = false;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 
 	if (unlikely(inode && IS_VENDOR_HIDDEN(inode) &&
 		     uid_gt(current_fsuid(), KUIDT_INIT(2000))))
@@ -84,6 +95,19 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 					    query_flags);
 
 	generic_fillattr(inode, stat);
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	/*
+	 * - SUS_KSTAT answers with the spoofed values the userspace asked for.
+	 * - Only the entries that were explicitly added are touched, the
+	 *   result_mask carries the STATX_SUS_KSTAT* marker through the internal
+	 *   call chain so that the spoofing happens exactly once, at the point
+	 *   where the kstat is materialised.
+	 */
+	if (susfs_is_inode_sus_kstat(inode, &is_fuse))
+		susfs_sus_kstat_spoof_generic_fillattr(
+			inode, stat, is_fuse ? STATX_SUS_KSTAT_FUSE
+					     : STATX_SUS_KSTAT);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 	return 0;
 }
 EXPORT_SYMBOL(vfs_getattr_nosec);
