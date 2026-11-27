@@ -26,11 +26,14 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - name: Fetch pinned AnyKernel3
+      - name: Fetch pinned kernel dependencies
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git submodule update --init --depth 1 AnyKernel3
           git submodule update --init --recursive KernelSU-Next
+          git submodule update --init --depth 1 NoMount
+          test "$(git -C NoMount rev-parse HEAD)" = dcd77d03e9912f397a586d7da81694d1628f170e
+          test -f fs/nomount/nomount.c
           test -f drivers/kernelsu/Kbuild
           git -C KernelSU-Next describe --tags --always
           bash scripts/prepare-ksun.sh
@@ -74,11 +77,14 @@ jobs:
           make "${args[@]}" vendor/xiaomi/miatoll_defconfig
           grep -qx 'CONFIG_KSU=y' out/.config
           grep -qx 'CONFIG_KSU_MANUAL_HOOK=y' out/.config
+          grep -qx 'CONFIG_NOMOUNT=y' out/.config
+          grep -qx 'CONFIG_KEYS=y' out/.config
           make -j"$(nproc)" "${args[@]}" Image
           ccache --show-stats
           llvm-nm out/vmlinux > out/vmlinux.symbols
           grep -E " [tT] kernelsu_init$" out/vmlinux.symbols
           grep -E " [tT] ksu_handle_sys_reboot$" out/vmlinux.symbols
+          grep -E " [tT] nomount_init$" out/vmlinux.symbols
           scripts/package-sixfaced.sh out/arch/arm64/boot/Image SixFaced.zip
           unzip -tq SixFaced.zip
       - uses: actions/upload-artifact@v5
