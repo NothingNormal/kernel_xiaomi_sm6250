@@ -863,6 +863,7 @@ config PERCPU_STATS
 config LRU_GEN
 	bool "Multigenerational LRU"
 	depends on MMU
+	depends on !MAXSMP && (64BIT || !SPARSEMEM || SPARSEMEM_VMEMMAP)
 	help
 	  A high performance LRU implementation to heavily overcommit workloads
 	  that are not IO bound. See Documentation/vm/multigen_lru.rst for

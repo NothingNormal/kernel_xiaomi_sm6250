@@ -1049,7 +1049,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			sc->nr_scanned++;
 
 		/* in case the page was found accessed by lru_gen_scan_around() */
-		if (lru_gen_enabled() && !skip_reference_check &&
+		if (lru_gen_enabled() && !force_reclaim &&
 		    page_mapped(page) && PageReferenced(page))
 			goto keep_locked;
 
@@ -2922,10 +2922,9 @@ void lru_gen_migrate_mm(struct mm_struct *mm)
 	rcu_read_lock();
 	memcg = mem_cgroup_from_task(mm->owner);
 	rcu_read_unlock();
-	if (memcg == mm->lrugen.memcg)
+	if (!mm->lrugen.memcg || memcg == mm->lrugen.memcg)
 		return;
 
-	VM_BUG_ON_MM(!mm->lrugen.memcg, mm);
 	VM_BUG_ON_MM(list_empty(&mm->lrugen.list), mm);
 
 	lru_gen_del_mm(mm);
@@ -2943,8 +2942,11 @@ static bool mm_has_migrated(struct mm_struct *mm, struct mem_cgroup *memcg)
 }
 #endif
 
+#define LRU_WALK_YOUNG_MAX ((PTRS_PER_PTE > PTRS_PER_PMD) ? PTRS_PER_PTE : PTRS_PER_PMD)
+
 struct mm_walk_args {
 	struct mem_cgroup *memcg;
+	struct lruvec *lruvec;
 	unsigned long max_seq;
 	unsigned long start_pfn;
 	unsigned long end_pfn;
@@ -2952,7 +2954,8 @@ struct mm_walk_args {
 	int node_id;
 	int swappiness;
 	int batch_size;
-	int nr_pages[MAX_NR_GENS][ANON_AND_FILE][MAX_NR_ZONES];
+	unsigned int nr_young;
+	struct page *young[LRU_WALK_YOUNG_MAX];
 	int mm_stats[NR_MM_STATS];
 	unsigned long bitmap[0];
 };
@@ -3084,52 +3087,60 @@ done:
  *                          the aging
  ******************************************************************************/
 
-static void update_batch_size(struct page *page, int old_gen, int new_gen,
-			      struct mm_walk_args *args)
+/*
+ * Take references while the page table is locked. Commit the generation and
+ * its accounting together under the LRU lock after leaving the page table.
+ * A racing isolate, migration, or MADV_FREE can otherwise change the list
+ * between the flag update and the accounting update.
+ */
+static int page_update_gen(struct page *page, int new_gen);
+
+static void queue_young_page(struct mm_walk_args *args, struct page *page)
 {
-	int type = page_is_file_cache(page);
-	int zone = page_zonenum(page);
-	int delta = hpage_nr_pages(page);
-
-	VM_BUG_ON(old_gen >= MAX_NR_GENS);
-	VM_BUG_ON(new_gen >= MAX_NR_GENS);
-
-	args->batch_size++;
-
-	args->nr_pages[old_gen][type][zone] -= delta;
-	args->nr_pages[new_gen][type][zone] += delta;
+	if (args->nr_young < LRU_WALK_YOUNG_MAX && get_page_unless_zero(page))
+		args->young[args->nr_young++] = page;
+	else
+		SetPageReferenced(page);
+	args->mm_stats[MM_LEAF_YOUNG]++;
 }
 
-static void reset_batch_size(struct lruvec *lruvec, struct mm_walk_args *args)
+static void flush_young_pages(struct mm_walk_args *args)
 {
-	int gen, type, zone;
-	struct lrugen *lrugen = &lruvec->evictable;
+	struct lruvec *lruvec = args->lruvec;
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+	struct lrugen *lrugen = &lruvec->evictable;
+	unsigned int i, nr = args->nr_young;
+	unsigned long flags;
+	int new_gen;
 
-	if (!args->batch_size)
+	if (!nr)
 		return;
 
-	args->batch_size = 0;
+	spin_lock_irqsave(&pgdat->lru_lock, flags);
+	new_gen = lru_gen_from_seq(lrugen->max_seq);
+	for (i = 0; i < nr; i++) {
+		struct page *page = args->young[i];
+		int old_gen;
 
-	spin_lock_irq(&pgdat->lru_lock);
-
-	for_each_gen_type_zone(gen, type, zone) {
-		enum lru_list lru = type * LRU_FILE;
-		int total = args->nr_pages[gen][type][zone];
-
-		if (!total)
+		if (page_pgdat(page) != pgdat ||
+		    page_memcg_rcu(page) != args->memcg)
 			continue;
-
-		args->nr_pages[gen][type][zone] = 0;
-		WRITE_ONCE(lrugen->sizes[gen][type][zone],
-			   lrugen->sizes[gen][type][zone] + total);
-
-		if (lru_gen_is_active(lruvec, gen))
-			lru += LRU_ACTIVE;
-		update_lru_size(lruvec, lru, zone, total);
+		if (!PageLRU(page) || PageUnevictable(page) ||
+		    !lrugen->enabled[page_is_file_cache(page)]) {
+			SetPageReferenced(page);
+			continue;
+		}
+		old_gen = page_update_gen(page, new_gen);
+		if (old_gen >= 0 && old_gen != new_gen) {
+			lru_gen_update_size(page, lruvec, old_gen, new_gen);
+			args->batch_size++;
+		}
 	}
+	spin_unlock_irqrestore(&pgdat->lru_lock, flags);
 
-	spin_unlock_irq(&pgdat->lru_lock);
+	args->nr_young = 0;
+	for (i = 0; i < nr; i++)
+		put_page(args->young[i]);
 }
 
 static int page_update_gen(struct page *page, int new_gen)
@@ -3239,14 +3250,14 @@ static bool walk_pte_range(pmd_t *pmd, unsigned long start, unsigned long end,
 	unsigned long addr;
 	int remote = 0;
 	struct mm_walk_args *args = walk->private;
-	int old_gen, new_gen = lru_gen_from_seq(args->max_seq);
 
 	VM_BUG_ON(pmd_trans_huge(*pmd) || pmd_devmap(*pmd));
 
 	pte = pte_offset_map_lock(walk->mm, pmd, start & PMD_MASK, &ptl);
 	arch_enter_lazy_mmu_mode();
 restart:
-	for (i = pte_index(start), addr = start; addr != end; i++, addr += PAGE_SIZE) {
+	i = (start >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
+	for (addr = start; addr != end; i++, addr += PAGE_SIZE) {
 		struct page *page;
 		unsigned long pfn = pte_pfn(pte[i]);
 
@@ -3292,10 +3303,7 @@ restart:
 			args->mm_stats[MM_LEAF_DIRTY]++;
 		}
 
-		old_gen = page_update_gen(page, new_gen);
-		if (old_gen >= 0 && old_gen != new_gen)
-			update_batch_size(page, old_gen, new_gen, args);
-		args->mm_stats[MM_LEAF_YOUNG]++;
+		queue_young_page(args, page);
 	}
 
 	if (i < PTRS_PER_PTE && get_next_vma(walk, PMD_MASK, PAGE_SIZE, &start, &end))
@@ -3303,6 +3311,7 @@ restart:
 
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(pte, ptl);
+	flush_young_pages(args);
 
 	return IS_ENABLED(CONFIG_HAVE_ARCH_PARENT_PMD_YOUNG) && !remote;
 }
@@ -3315,7 +3324,6 @@ static void __walk_pmd_range(pud_t *pud, unsigned long start,
 	pmd_t *pmd;
 	spinlock_t *ptl;
 	struct mm_walk_args *args = walk->private;
-	int old_gen, new_gen = lru_gen_from_seq(args->max_seq);
 
 	VM_BUG_ON(pud_trans_huge(*pud) || pud_devmap(*pud));
 
@@ -3377,14 +3385,12 @@ static void __walk_pmd_range(pud_t *pud, unsigned long start,
 			args->mm_stats[MM_LEAF_DIRTY]++;
 		}
 
-		old_gen = page_update_gen(page, new_gen);
-		if (old_gen >= 0 && old_gen != new_gen)
-			update_batch_size(page, old_gen, new_gen, args);
-		args->mm_stats[MM_LEAF_YOUNG]++;
+		queue_young_page(args, page);
 	}
 
 	arch_leave_lazy_mmu_mode();
 	spin_unlock(ptl);
+	flush_young_pages(args);
 
 	bitmap_zero(args->bitmap, PTRS_PER_PMD);
 }
@@ -3526,6 +3532,7 @@ static void walk_mm(struct mm_walk_args *args, struct mm_struct *mm)
 		.p4d_entry = walk_pud_range,
 	};
 
+	args->lruvec = lruvec;
 	args->next_addr = FIRST_USER_ADDRESS;
 
 	do {
@@ -3550,8 +3557,9 @@ static void walk_mm(struct mm_walk_args *args, struct mm_struct *mm)
 
 		up_read(&mm->mmap_sem);
 
-		reset_batch_size(lruvec, args);
 contended:
+		flush_young_pages(args);
+		args->batch_size = 0;
 		rcu_read_unlock();
 
 		cond_resched();
@@ -3812,8 +3820,10 @@ void lru_gen_scan_around(struct page_vma_mapped_walk *pvmw)
 	arch_enter_lazy_mmu_mode();
 
 	memcg = lock_page_memcg(pvmw->page);
-	if (WARN_ON_ONCE(!mem_cgroup_disabled() && !memcg))
+	if (WARN_ON_ONCE(!mem_cgroup_disabled() && !memcg)) {
+		__unlock_page_memcg(memcg);
 		goto out;
+	}
 
 	spin_lock_irq(&pgdat->lru_lock);
 
@@ -3858,12 +3868,12 @@ void lru_gen_scan_around(struct page_vma_mapped_walk *pvmw)
 	}
 
 	spin_unlock_irq(&pgdat->lru_lock);
-	unlock_page_memcg(pvmw->page);
+	__unlock_page_memcg(memcg);
 out:
 	arch_leave_lazy_mmu_mode();
 
 	for_each_set_bit(i, bitmap, SWAP_CLUSTER_MAX * 2)
-		set_page_dirty(pte_page(pte[i]));
+		set_page_dirty(compound_head(pte_page(pte[i])));
 }
 
 /******************************************************************************
@@ -4242,6 +4252,11 @@ static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc, int s
 	if (get_hi_wmark(max_seq, min_seq, swappiness) > MIN_NR_GENS)
 		return nr_to_scan;
 
+	if (!arch_has_hw_pte_young()) {
+		inc_max_seq(lruvec, max_seq);
+		return nr_to_scan;
+	}
+
 	/* kswapd uses lru_gen_age_node() */
 	if (current_is_kswapd())
 		return 0;
@@ -4331,6 +4346,9 @@ static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 	struct mem_cgroup *memcg;
 
 	VM_BUG_ON(!current_is_kswapd());
+
+	if (!arch_has_hw_pte_young())
+		return;
 
 	memcg = mem_cgroup_iter(NULL, NULL, NULL);
 	do {
