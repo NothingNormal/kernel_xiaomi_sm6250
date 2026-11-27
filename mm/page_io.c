@@ -25,6 +25,7 @@
 #include <linux/psi.h>
 #include <linux/uio.h>
 #include <linux/sched/task.h>
+#include <linux/kthread.h>
 #include <asm/pgtable.h>
 
 static struct bio *get_swap_bio(gfp_t gfp_flags,
@@ -194,23 +195,138 @@ bad_bmap:
  * We may have stale swap cache pages in memory: notice
  * them here and get rid of the unnecessary final write.
  */
-int swap_writepage(struct page *page, struct writeback_control *wbc)
-{
-	int ret = 0;
+/* kcompressd-unofficial v0.5, adapted to the 4.14 page/frontswap API. */
+int vm_kcompressd = 24;
 
-	if (try_to_free_swap(page)) {
-		unlock_page(page);
-		goto out;
-	}
+static int swap_writepage_sync(struct page *page, struct writeback_control *wbc)
+{
 	if (frontswap_store(page) == 0) {
 		set_page_writeback(page);
 		unlock_page(page);
 		end_page_writeback(page);
-		goto out;
+		return 0;
 	}
-	ret = __swap_writepage(page, wbc, end_swap_bio_write);
-out:
-	return ret;
+	return __swap_writepage(page, wbc, end_swap_bio_write);
+}
+
+static void kcompressd_swapout(struct page *page)
+{
+	struct writeback_control wbc = {
+		.sync_mode = WB_SYNC_NONE,
+		.nr_to_write = SWAP_CLUSTER_MAX,
+		.range_end = LLONG_MAX,
+		.for_reclaim = 1,
+	};
+
+	swap_writepage_sync(page, &wbc);
+	put_page(page);
+}
+
+static bool kcompressd_store(struct page *page)
+{
+	pg_data_t *pgdat = page_pgdat(page);
+	struct page *head = NULL;
+	unsigned long flags;
+	unsigned int limit = READ_ONCE(vm_kcompressd);
+	bool queued = false, got_ref = false;
+
+	if (!limit || !current_is_kswapd() || !PageAnon(page) ||
+	    !PageSwapCache(page) || PageTransHuge(page))
+		return false;
+	/* Only offload swap devices marked efficient for synchronous IO. */
+	if (!(READ_ONCE(page_swap_info(page)->flags) & SWP_SYNCHRONOUS_IO))
+		return false;
+
+	spin_lock_irqsave(&pgdat->kcompress_fifo_lock, flags);
+	if (pgdat->kcompressd) {
+		if (kfifo_len(&pgdat->kcompress_fifo) >= limit)
+			kfifo_get(&pgdat->kcompress_fifo, &head);
+		get_page(page);
+		got_ref = true;
+		queued = kfifo_put(&pgdat->kcompress_fifo, page);
+	}
+	spin_unlock_irqrestore(&pgdat->kcompress_fifo_lock, flags);
+
+	if (queued)
+		wake_up(&pgdat->kcompressd_wait);
+	else if (got_ref)
+		put_page(page);
+
+	if (head)
+		kcompressd_swapout(head);
+
+	return queued;
+}
+
+static int kcompressd_thread(void *data)
+{
+	pg_data_t *pgdat = data;
+	struct page *page;
+
+	current->flags |= PF_MEMALLOC;
+	for (;;) {
+		wait_event_interruptible(pgdat->kcompressd_wait,
+			kthread_should_stop() || !kfifo_is_empty(&pgdat->kcompress_fifo));
+		while (1) {
+			unsigned long flags;
+			bool have_page;
+
+			spin_lock_irqsave(&pgdat->kcompress_fifo_lock, flags);
+			have_page = kfifo_get(&pgdat->kcompress_fifo, &page);
+			spin_unlock_irqrestore(&pgdat->kcompress_fifo_lock, flags);
+			if (!have_page)
+				break;
+			kcompressd_swapout(page);
+			cond_resched();
+		}
+		if (kthread_should_stop())
+			break;
+	}
+	current->flags &= ~PF_MEMALLOC;
+	return 0;
+}
+
+void kcompressd_start(pg_data_t *pgdat)
+{
+	struct task_struct *task;
+	unsigned long flags;
+
+	task = kthread_run(kcompressd_thread, pgdat, "kcompressd%d", pgdat->node_id);
+	if (IS_ERR(task)) {
+		pr_warn("kcompressd%d: failed to start (%ld)\n",
+			pgdat->node_id, PTR_ERR(task));
+		return;
+	}
+
+	spin_lock_irqsave(&pgdat->kcompress_fifo_lock, flags);
+	pgdat->kcompressd = task;
+	spin_unlock_irqrestore(&pgdat->kcompress_fifo_lock, flags);
+}
+
+void kcompressd_stop(pg_data_t *pgdat)
+{
+	struct task_struct *task;
+	unsigned long flags;
+
+	/* Stop accepting work before draining the FIFO. */
+	spin_lock_irqsave(&pgdat->kcompress_fifo_lock, flags);
+	task = pgdat->kcompressd;
+	pgdat->kcompressd = NULL;
+	spin_unlock_irqrestore(&pgdat->kcompress_fifo_lock, flags);
+
+	if (task)
+		kthread_stop(task);
+}
+
+int swap_writepage(struct page *page, struct writeback_control *wbc)
+{
+	if (try_to_free_swap(page)) {
+		unlock_page(page);
+		return 0;
+	}
+	if (wbc->for_reclaim && kcompressd_store(page))
+		return 0;
+	return swap_writepage_sync(page, wbc);
 }
 
 static inline void count_swpout_vm_event(struct page *page)

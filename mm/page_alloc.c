@@ -6372,6 +6372,11 @@ static void __paginginit free_area_init_core(struct pglist_data *pgdat)
 	pgdat->split_queue_len = 0;
 #endif
 	init_waitqueue_head(&pgdat->kswapd_wait);
+#ifdef CONFIG_SWAP
+	init_waitqueue_head(&pgdat->kcompressd_wait);
+	spin_lock_init(&pgdat->kcompress_fifo_lock);
+	INIT_KFIFO(pgdat->kcompress_fifo);
+#endif
 	init_waitqueue_head(&pgdat->pfmemalloc_wait);
 #ifdef CONFIG_COMPACTION
 	init_waitqueue_head(&pgdat->kcompactd_wait);

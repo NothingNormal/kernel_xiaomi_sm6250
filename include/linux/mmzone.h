@@ -24,6 +24,7 @@
 #include <linux/pageblock-flags.h>
 #include <linux/page-flags-layout.h>
 #include <linux/atomic.h>
+#include <linux/kfifo.h>
 #include <asm/page.h>
 
 /* Free memory management - zoned buddy allocator.  */
@@ -825,6 +826,13 @@ typedef struct pglist_data {
 	enum zone_type kswapd_classzone_idx;
 
 	int kswapd_failures;		/* Number of 'reclaimed == 0' runs */
+#ifdef CONFIG_SWAP
+#define KCOMPRESS_FIFO_SIZE 256
+	wait_queue_head_t kcompressd_wait;
+	struct task_struct *kcompressd;
+	DECLARE_KFIFO(kcompress_fifo, struct page *, KCOMPRESS_FIFO_SIZE);
+	spinlock_t kcompress_fifo_lock;
+#endif
 
 #ifdef CONFIG_COMPACTION
 	int kcompactd_max_order;

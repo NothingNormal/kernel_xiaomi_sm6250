@@ -1486,7 +1486,22 @@ static struct ctl_table kern_table[] = {
 	{ }
 };
 
+#ifdef CONFIG_SWAP
+static int kcompressd_fifo_max = KCOMPRESS_FIFO_SIZE;
+#endif
+
 static struct ctl_table vm_table[] = {
+#ifdef CONFIG_SWAP
+	{
+		.procname	= "kcompressd",
+		.data		= &vm_kcompressd,
+		.maxlen		= sizeof(vm_kcompressd),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &kcompressd_fifo_max,
+	},
+#endif
 	{
 		.procname	= "overcommit_memory",
 		.data		= &sysctl_overcommit_memory,

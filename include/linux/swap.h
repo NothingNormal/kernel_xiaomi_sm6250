@@ -389,6 +389,9 @@ extern void kswapd_stop(int nid);
 /* linux/mm/page_io.c */
 extern int swap_readpage(struct page *page, bool do_poll);
 extern int swap_writepage(struct page *page, struct writeback_control *wbc);
+extern int vm_kcompressd;
+void kcompressd_start(pg_data_t *pgdat);
+void kcompressd_stop(pg_data_t *pgdat);
 extern void end_swap_bio_write(struct bio *bio);
 extern int __swap_writepage(struct page *page, struct writeback_control *wbc,
 	bio_end_io_t end_write_func);

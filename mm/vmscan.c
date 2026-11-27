@@ -6857,6 +6857,10 @@ int kswapd_run(int nid)
 		ret = PTR_ERR(pgdat->kswapd);
 		pgdat->kswapd = NULL;
 	}
+#ifdef CONFIG_SWAP
+	if (!ret)
+		kcompressd_start(pgdat);
+#endif
 	return ret;
 }
 
@@ -6872,6 +6876,9 @@ void kswapd_stop(int nid)
 		kthread_stop(kswapd);
 		NODE_DATA(nid)->kswapd = NULL;
 	}
+#ifdef CONFIG_SWAP
+	kcompressd_stop(NODE_DATA(nid));
+#endif
 }
 
 static int __init kswapd_init(void)
