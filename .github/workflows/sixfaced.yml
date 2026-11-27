@@ -1,0 +1,63 @@
+name: SixFaced miatoll kernel
+on:
+  push:
+    branches: [KSUN]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install host build tools
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates curl flex git jq libelf-dev \
+            libssl-dev libncurses-dev lz4 python3 zip unzip zstd xz-utils cpio kmod \
+            gcc-arm-linux-gnueabi gcc-aarch64-linux-gnu device-tree-compiler
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch pinned AnyKernel3
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule update --init --depth 1 AnyKernel3
+      - name: Install latest Neutron Clang
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          cd "$tmp"
+          curl -fsSL --retry 3 https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest -o release.json
+          asset=$(jq -ec '[.assets[] | select(.name | test("^neutron-clang-[0-9]+\\\\.tar\\\\.zst$"))] | select(length == 1) | first' release.json)
+          url=$(jq -er '.browser_download_url' <<< "$asset")
+          sha=$(jq -er '.digest | capture("^sha256:(?<hex>[0-9a-f]{64})$").hex' <<< "$asset")
+          curl -fL --retry 3 "$url" -o neutron.tar.zst
+          echo "$sha  neutron.tar.zst" | sha256sum -c -
+          mkdir -p /opt/neutron
+          tar --zstd -xf neutron.tar.zst -C /opt/neutron
+          /opt/neutron/bin/clang --version
+          echo /opt/neutron/bin >> "$GITHUB_PATH"
+      - name: Build arm64 Image
+        run: |
+          set -euo pipefail
+          args=(ARCH=arm64 O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+                OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+                READELF=llvm-readelf LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
+                CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-)
+          make "${args[@]}" vendor/xiaomi/miatoll_defconfig
+          make -j"$(nproc)" "${args[@]}" Image
+          scripts/package-sixfaced.sh out/arch/arm64/boot/Image SixFaced.zip
+          unzip -tq SixFaced.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SixFaced-miatoll-${{ github.run_number }}
+          path: SixFaced.zip
+          if-no-files-found: error
