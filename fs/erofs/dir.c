@@ -3,6 +3,7 @@
  * Copyright (C) 2017-2018 HUAWEI, Inc.
  *             https://www.huawei.com/
  */
+#include <linux/sched/signal.h>
 #include "internal.h"
 
 static const unsigned char erofs_filetype_table[EROFS_FT_MAX] = {
@@ -93,6 +94,24 @@ static int erofs_readdir(struct file *f, struct dir_context *ctx)
 		struct erofs_dirent *de;
 		unsigned int nameoff, maxsize;
 
+		if (fatal_signal_pending(current)) {
+			err = -ERESTARTSYS;
+			break;
+		}
+
+		/* Use the legacy page cache's readahead API on a cache miss. */
+		dentry_page = find_get_page(mapping, i);
+		if (!dentry_page) {
+			unsigned long left = DIV_ROUND_UP(dirsize, PAGE_SIZE) - i;
+
+			page_cache_sync_readahead(mapping, &f->f_ra, f, i,
+						  min_t(unsigned long, left, 4));
+		} else {
+			if (PageReadahead(dentry_page))
+				page_cache_async_readahead(mapping, &f->f_ra, f,
+							   dentry_page, i, 4);
+			put_page(dentry_page);
+		}
 		dentry_page = read_mapping_page(mapping, i, NULL);
 		if (dentry_page == ERR_PTR(-ENOMEM)) {
 			err = -ENOMEM;
@@ -143,6 +162,7 @@ skip_this:
 			break;
 		++i;
 		ofs = 0;
+		cond_resched();
 	}
 	return err < 0 ? err : 0;
 }

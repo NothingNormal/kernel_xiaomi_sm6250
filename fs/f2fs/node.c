@@ -2934,7 +2934,8 @@ int f2fs_flush_nat_entries(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 	struct f2fs_journal *journal = curseg->journal;
 	struct nat_entry_set *setvec[SETVEC_SIZE];
 	struct nat_entry_set *set, *tmp;
-	unsigned int found;
+	unsigned int found, journal_entries = 0;
+	struct blk_plug plug;
 	nid_t set_idx = 0;
 	LIST_HEAD(sets);
 	int err = 0;
@@ -2968,6 +2969,20 @@ int f2fs_flush_nat_entries(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 			__adjust_nat_entry_set(setvec[idx], &sets,
 						MAX_NAT_JENTRIES(journal));
 	}
+
+	/*
+	 * Submit reads for NAT blocks that cannot fit in the checkpoint
+	 * journal before the synchronous flush loop starts.
+	 */
+	blk_start_plug(&plug);
+	list_for_each_entry(set, &sets, set_list) {
+		journal_entries += set->entry_cnt;
+		if (!enabled_nat_bits(sbi, cpc) &&
+		    __has_cursum_space(journal, journal_entries, NAT_JOURNAL))
+			continue;
+		f2fs_ra_meta_pages(sbi, set->set, 1, META_NAT, true);
+	}
+	blk_finish_plug(&plug);
 
 	/* flush dirty nats in nat entry set */
 	list_for_each_entry_safe(set, tmp, &sets, set_list) {
