@@ -30,6 +30,9 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git submodule update --init --depth 1 AnyKernel3
+          git submodule update --init --recursive KernelSU-Next
+          test -f drivers/kernelsu/Kbuild
+          git -C KernelSU-Next describe --tags --always
       - name: Install latest Neutron Clang
         run: |
           set -euo pipefail
@@ -53,7 +56,12 @@ jobs:
                 READELF=llvm-readelf KCFLAGS=-mtune=cortex-a76 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
                 CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-)
           make "${args[@]}" vendor/xiaomi/miatoll_defconfig
+          grep -qx 'CONFIG_KSU=y' out/.config
+          grep -qx 'CONFIG_KSU_MANUAL_HOOK=y' out/.config
           make -j"$(nproc)" "${args[@]}" Image
+          llvm-nm out/vmlinux > out/vmlinux.symbols
+          grep -E " [tT] kernelsu_init$" out/vmlinux.symbols
+          grep -E " [tT] ksu_handle_sys_reboot$" out/vmlinux.symbols
           scripts/package-sixfaced.sh out/arch/arm64/boot/Image SixFaced.zip
           unzip -tq SixFaced.zip
       - uses: actions/upload-artifact@v4
