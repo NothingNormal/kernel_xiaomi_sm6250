@@ -11,7 +11,8 @@
 static struct rtp_head head = { 0 };
 
 static struct idx_element *index_table;
-static unsigned char *instruction_data;;
+static unsigned char *instruction_data;
+static unsigned int instruction_size;
 
 unsigned char *instruction_begin;;
 unsigned char *instruction_current;
@@ -39,7 +40,11 @@ int set_running_effect_id(int id)
 	if (!open_rtp) {
 		return -INVALID;
 	}
-	if (index_table[id].length == 0) {
+	if (id < 0 || id >= INDEX_NUM)
+		return -INVALID;
+	if (index_table[id].length == 0 ||
+	    index_table[id].offset > instruction_size ||
+	    index_table[id].length > instruction_size - index_table[id].offset) {
 		pr_info("%s: index_table[id].length=0\n", __func__);
 		return -INVALID;
 	}
@@ -70,7 +75,7 @@ static int rtp_parse_header(unsigned char *pData, unsigned int nSize)
 	pr_info("rtp version : %d\n", head.ver);
 	pData += 4;
 
-	memcpy(&head.effect_num, pData, 4);
+	memcpy(&head.effect_num, pData, sizeof(head.effect_num));
 	pr_info("rtp effect_num : %d\n", head.effect_num);
 	pData += 8;
 	return pData - pDataStart;
@@ -81,7 +86,9 @@ int rtp_parse(unsigned char *pData, unsigned int nSize)
 	int head_size = 0;
 	int i;
 	pr_info("%s begin\n", __func__);
-	open_rtp = true;
+	open_rtp = false;
+	if (nSize < RTP_HEAD_SIZE + INDEX_NUM * sizeof(struct idx_element))
+		return -INVALID;
 	head_size = rtp_parse_header(pData, nSize);
 	pr_info("header size: %d\n", head_size);
 	if (head_size < 0 || head_size >= nSize) {
@@ -97,7 +104,9 @@ int rtp_parse(unsigned char *pData, unsigned int nSize)
 		       __func__, i, index_table[i].offset,
 		       index_table[i].length, index_table[i].duration);
 	}
-	instruction_data = pData + INDEX_NUM * 6;
+	instruction_data = pData + INDEX_NUM * sizeof(struct idx_element);
+	instruction_size = nSize - RTP_HEAD_SIZE - INDEX_NUM * sizeof(struct idx_element);
+	open_rtp = true;
 	pr_info("%s: idx_element size = %d\n", __func__,
 	       sizeof(struct idx_element));
 	pr_info("%s end\n", __func__);

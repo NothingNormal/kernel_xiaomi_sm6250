@@ -85,6 +85,8 @@ static void get_command_str(struct drv2624_data *pDRV2624)
 	pDRV2624->mnVibratorPlaying = YES;
 	while (pop_result >= 0 && pDRV2624->mnVibratorPlaying == YES) {
 		pop_result = pop_running_effect_command(&command, &data);
+		if (pop_result < 0)
+			break;
 		dev_err(pDRV2624->dev, "%s: command = %c, data = %d mnVibratorPlaying:%d \n",
 			__func__, command, data, pDRV2624->mnVibratorPlaying);
 
@@ -254,6 +256,8 @@ static int drv2624_set_go_bit(struct drv2624_data *pDRV2624, unsigned char val)
 	dev_dbg(pDRV2624->dev, "%s, go value = %d\n", __func__, value);
 	while (((value & DRV2624_GO_BIT_MASK) != val) && (retry > 0)) {
 		value = drv2624_reg_read(pDRV2624, DRV2624_REG_GO);
+		if (value < 0)
+			return value;
 		dev_dbg(pDRV2624->dev, "%s, GO bit %d\n", __func__, value);
 		mdelay(GO_BIT_CHECK_INTERVAL);
 		retry--;
@@ -459,18 +463,20 @@ static void vibrator_work_routine(struct work_struct *work)
 {
 	struct drv2624_data *pDRV2624 =
 	    container_of(work, struct drv2624_data, vibrator_work);
-	unsigned char status;
+	int status;
 	int nResult = 0;
 	mutex_lock(&pDRV2624->lock);
 	dev_dbg(pDRV2624->dev, "%s, afer mnWorkMode=0x%x\n", __func__,
 		pDRV2624->mnWorkMode);
 	if (pDRV2624->mbIRQUsed) {
-		pDRV2624->mnIntStatus =
-		    drv2624_reg_read(pDRV2624, DRV2624_REG_STATUS);
-		if (nResult < 0)
+		nResult = drv2624_reg_read(pDRV2624, DRV2624_REG_STATUS);
+		if (nResult < 0) {
+			drv2624_stop(pDRV2624);
 			goto err;
+		}
+		pDRV2624->mnIntStatus = nResult;
 		drv2624_disableIRQ(pDRV2624);
-		status = pDRV2624->mnIntStatus;
+		status = nResult;
 		dev_dbg(pDRV2624->dev, "%s, status=0x%x\n", __func__,
 			pDRV2624->mnIntStatus);
 		if (status & OVERCURRENT_MASK)
@@ -489,10 +495,15 @@ static void vibrator_work_routine(struct work_struct *work)
 	} else if (pDRV2624->mnWorkMode == DRV2624_RAM_MODE) {
 		dev_err(pDRV2624->dev, "%s: read go bit\n", __func__);
 		status = drv2624_reg_read(pDRV2624, DRV2624_REG_GO);
-		if ((status < 0) || (status == STOP)
-		    || !pDRV2624->mnVibratorPlaying) {
+		if (status < 0) {
+			drv2624_stop(pDRV2624);
+			goto err;
+		}
+		if (!(status & DRV2624_GO_BIT_MASK) ||
+		    !pDRV2624->mnVibratorPlaying) {
 			dev_err(pDRV2624->dev, "%s: status error = %d\n",
 				__func__, status);
+			hrtimer_cancel(&pDRV2624->haptics_timer);
 			drv2624_set_stopflag(pDRV2624);
 		} else {
 			if (!hrtimer_active(&pDRV2624->haptics_timer)) {
@@ -1174,6 +1185,9 @@ static int drv2624_get_effect_timems(struct drv2624_data *pDRV2624,
 	address = tmp << 8 | fw[header_address + 1];
 	effect_repeats = (fw[header_address + 2] & 0xe0) >> 5;
 	effect_size = fw[header_address + 2] & 0x1f;
+	if (address >= DRV2624_RAM_SIZE ||
+	    effect_size > DRV2624_RAM_SIZE - address)
+		return 0;
 	for (i = 0; i < effect_size / 2; i++) {
 		ticks += fw[address + (i * 2) + 1];
 	}
@@ -1202,14 +1216,16 @@ static void drv2624_firmware_load(const struct firmware *fw, void *context)
 	if (fw != NULL) {
 		pBuf = fw->data;
 		size = fw->size;
-		if (size > 1024) {
+		if (size < sizeof(struct drv2624_fw_header) || size > 1024) {
 			dev_err(pDRV2624->dev,
 				"%s, ERROR!! firmware size %d too big\n",
 				__func__, size);
 		} else {
 			memcpy(&(pDRV2624->fw_header), pBuf,
 			       sizeof(struct drv2624_fw_header));
-			if ((pDRV2624->fw_header.fw_magic !=
+			if (pDRV2624->fw_header.fw_effCount <= 0 ||
+			    pDRV2624->fw_header.fw_effCount > EFFECT_MAX_NUM ||
+			    (pDRV2624->fw_header.fw_magic !=
 			     DRV2624_MAGIC) || (pDRV2624->fw_header.fw_size !=
 						size)
 			    || (pDRV2624->fw_header.fw_chksum !=
@@ -1565,7 +1581,7 @@ static int drv2624_haptics_upload_effect(struct input_dev *dev,
 	int nResult = 0;
 	ktime_t rem;
 	s64 time_us;
-	uint time_ms = 0;
+	int time_ms = 0;
 	dev_err(pDRV2624->dev, "%s enter function \n", __func__);
 	mutex_lock(&pDRV2624->lock);
 	/* waiting last vibration to end */
@@ -1605,6 +1621,7 @@ static int drv2624_haptics_upload_effect(struct input_dev *dev,
 			break;
 		}
 		/**1-5-2**/
+		play->length = 0;
 		play->effect_id = data[CUSTOM_DATA_EFFECT_IDX] + 1;
 		play->magnitude = effect->u.periodic.magnitude;
 		dev_err(pDRV2624->dev, "%s: effect_id = %d, fw_effCount = %d\n",
@@ -1667,12 +1684,16 @@ static int drv2624_haptics_upload_effect(struct input_dev *dev,
 				nResult = -EFAULT;
 				break;
 			}
-			schedule_work(&pDRV2624->upload_periodic_work);
+			/* Program the waveform under the playback worker lock. */
 			break;
 		} else if (play->effect_id > pDRV2624->fw_header.fw_effCount
 			   && play->effect_id < 127) {
 			pDRV2624->mnWorkMode = DRV2624_NEW_RTP_MODE;
-			time_ms = set_running_effect_id(play->effect_id - 1);	//test
+			time_ms = set_running_effect_id(play->effect_id - 1);
+			if (time_ms < 0) {
+				nResult = -EINVAL;
+				break;
+			}
 			data[CUSTOM_DATA_TIMEOUT_SEC_IDX] = time_ms / MSEC_PER_SEC;	//300 / 1000;
 			dev_err(pDRV2624->dev, " rtp data[1] time_ms =%d\n",
 				data[CUSTOM_DATA_TIMEOUT_SEC_IDX]);
@@ -1689,6 +1710,7 @@ static int drv2624_haptics_upload_effect(struct input_dev *dev,
 			schedule_work(&pDRV2624->upload_periodic_work);
 			break;
 		}
+		nResult = -EINVAL;
 		break;
 	default:
 		dev_err(pDRV2624->dev, "Unsupported effect type: %d\n",
@@ -1739,9 +1761,18 @@ static void haptics_playback_work_routine(struct work_struct *work)
 	switch (pDRV2624->mnWorkMode) {
 	case DRV2624_RAM_MODE:
 		dev_err(pDRV2624->dev, "%s:DRV2624_RAM_MODE enter\n", __func__);
+		nResult = drv2624_set_waveform(pDRV2624,
+					       &pDRV2624->msWaveformSequencer);
+		if (nResult < 0)
+			break;
 		nResult = drv2624_playEffect(pDRV2624);
-		if ((nResult >= 0) && pDRV2624->mbIRQUsed) {
-			drv2624_enableIRQ(pDRV2624, NO);
+		if (nResult >= 0) {
+			if (pDRV2624->mbIRQUsed)
+				drv2624_enableIRQ(pDRV2624, NO);
+			/* Poll GO as a fallback if the completion IRQ is missed. */
+			hrtimer_start(&pDRV2624->haptics_timer,
+				      ms_to_ktime(GO_BIT_CHECK_INTERVAL),
+				      HRTIMER_MODE_REL);
 		}
 		break;
 	case DRV2624_NEW_RTP_MODE:
@@ -2009,7 +2040,6 @@ static irqreturn_t drv2624_irq_handler(int irq, void *dev_id)
 {
 	struct drv2624_data *pDRV2624 = (struct drv2624_data *)dev_id;
 	dev_err(pDRV2624->dev, "%s: enter\n", __func__);
-	pDRV2624->mnWorkMode |= WORK_IRQ;
 	schedule_work(&pDRV2624->vibrator_work);
 	return IRQ_HANDLED;
 }
