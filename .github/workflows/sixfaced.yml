@@ -122,8 +122,6 @@ jobs:
           grep -qx 'CONFIG_KEYS=y' out/.config
           grep -qx 'CONFIG_KSU_SUSFS=y' out/.config
           grep -qx 'CONFIG_THREAD_INFO_IN_TASK=y' out/.config
-          grep -qx 'CONFIG_LRU_GEN=y' out/.config
-          grep -qx '# CONFIG_LRU_GEN_ENABLED is not set' out/.config
           make -j"$(nproc)" "${args[@]}" Image
           ccache --show-stats
           llvm-nm out/vmlinux > out/vmlinux.symbols
