@@ -393,6 +393,13 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 		scm_data[3] = context_count;
 		__secure_tz_update_entry3(scm_data, sizeof(scm_data),
 					&val, sizeof(val), priv);
+		/* Step up two levels when low GPU clocks are saturated. */
+		if (!priv->disable_busy_time_burst && level >= 4 &&
+		    priv->bin.total_time > 0 &&
+		    (u64)priv->bin.busy_time * 100 >=
+		    (u64)priv->bin.total_time * 88 &&
+		    val > -2)
+			val = -2;
 	}
 	priv->bin.total_time = 0;
 	priv->bin.busy_time = 0;

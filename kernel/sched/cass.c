@@ -29,6 +29,8 @@ struct cass_cpu_cand {
 	int cpu;
 	unsigned int exit_lat;
 	unsigned long cap;
+	unsigned long cap_orig;
+	unsigned long raw_util;
 	unsigned long util;
 };
 
@@ -59,20 +61,39 @@ unsigned long cass_cpu_util(int cpu, int this_cpu, bool sync)
 /* Returns true if @a is a better CPU than @b */
 static __always_inline
 bool cass_cpu_better(const struct cass_cpu_cand *a,
-		     const struct cass_cpu_cand *b, unsigned long p_util,
-		     int this_cpu, int prev_cpu, bool sync)
+		     const struct cass_cpu_cand *b,
+		     int this_cpu, int prev_cpu, bool sync, bool boosted)
 {
-#define cass_cmp(a, b) ({ res = (a) - (b); })
+#define cass_cmp(a, b) ({ res = (long)(a) - (long)(b); })
 #define cass_eq(a, b) ({ res = (a) == (b); })
 	long res;
 
-	/* Prefer the CPU that fits the task */
-	if (cass_cmp(fits_capacity(p_util, a->cap),
-		     fits_capacity(p_util, b->cap)))
+	/* Prefer the CPU that fits the combined CPU + task utilization */
+	if (cass_cmp(fits_capacity(a->raw_util, a->cap),
+		     fits_capacity(b->raw_util, b->cap)))
 		goto done;
-		
-	/* Prefer the current CPU for sync wakes */
-	if (sync && (cass_eq(a->cpu, this_cpu) || !cass_cmp(b->cpu, this_cpu)))
+
+	/*
+	 * Energy-aware cluster packing for unboosted tasks: when both CPUs fit
+	 * the combined load comfortably, keep background/daemon/light tasks on
+	 * the efficient Kryo 465 Silver cluster so the Gold Cortex-A76 cluster
+	 * stays in deep power collapse. Boosted tasks (top-app UI, SurfaceFlinger,
+	 * Circle to Search / Google Lens, games) skip this and get full Gold
+	 * Cortex-A76 access immediately.
+	 */
+	if (!boosted && fits_capacity(a->raw_util, a->cap) &&
+	    cass_cmp(b->cap_orig, a->cap_orig))
+		goto done;
+
+	/*
+	 * Prefer the current CPU for sync wakes, except when a boosted top-app
+	 * task is woken from a LITTLE core while a higher-capacity Gold core
+	 * candidate is available.
+	 */
+	if (sync &&
+	    (!boosted ||
+	     capacity_orig_of(this_cpu) >= max(a->cap_orig, b->cap_orig)) &&
+	    (cass_eq(a->cpu, this_cpu) || !cass_cmp(b->cpu, this_cpu)))
 		goto done;
 
 	/* Prefer the CPU with lower relative utilization */
@@ -80,11 +101,15 @@ bool cass_cpu_better(const struct cass_cpu_cand *a,
 		goto done;
 
 	/* Prefer the CPU with higher capacity */
- 	if (cass_cmp(a->cap, b->cap))
- 		goto done;
+	if (cass_cmp(a->cap, b->cap))
+		goto done;
 
-	/* Prefer the CPU with higher idle exit latency */
-	if (cass_cmp(a->exit_lat, b->exit_lat))
+	/*
+	 * Prefer the shallowest idle state (smaller exit_lat) so waking an idle
+	 * CPU incurs minimal wakeup latency while leaving deeper-sleeping CPUs
+	 * undisturbed in cluster power collapse.
+	 */
+	if (cass_cmp(b->exit_lat, a->exit_lat))
 		goto done;
 
 	/* Prefer the previous CPU */
@@ -102,7 +127,8 @@ done:
 	return res > 0;
 }
 
-static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
+static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync,
+			 bool boosted)
 {
 	/* Initialize @best such that @best always has a valid CPU at the end */
 	struct cass_cpu_cand cands[2], *best = cands, *curr;
@@ -110,10 +136,22 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 	struct cpuidle_state *idle_state;
 	bool has_idle = false;
 	unsigned long p_util;
+	long margin;
 	int cidx = 0, cpu;
 
-	/* Get the utilization for this task */
+	/*
+	 * Get the utilization for this task, incorporating schedtune margin so
+	 * newly woken/thawed top-app workers (e.g. Google Lens / Circle to
+	 * Search / SurfaceFlinger) immediately reflect foreground demand while
+	 * negative-boost background tasks stay damped.
+	 */
 	p_util = task_util_est(p);
+	margin = schedtune_task_margin(p);
+	if (margin > 0)
+		p_util = min_t(unsigned long, SCHED_CAPACITY_SCALE,
+			       p_util + (unsigned long)margin);
+	else if (margin < 0)
+		sub_positive(&p_util, (unsigned long)(-margin));
 
 	/*
 	 * Find the best CPU to wake @p on. The RCU read lock is needed for
@@ -154,24 +192,23 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 		}
 
 		/* Get this CPU's utilization, possibly without @current */
-		curr->util = cass_cpu_util(cpu, this_cpu, sync);
+		curr->raw_util = cass_cpu_util(cpu, this_cpu, sync);
 
 		/*
 		 * Add @p's utilization to this CPU if it's not @p's CPU, to
-		 * find what this CPU's relative utilization would look like
-		 * if @p were on it.
+		 * find what this CPU's utilization would look like with @p.
 		 */
 		if (cpu != task_cpu(p))
-			curr->util += p_util;
+			curr->raw_util += p_util;
 
 		/*
-		 * Get the current capacity of this CPU adjusted for thermal
-		 * pressure as well as IRQ and RT-task time.
+		 * Get the current and max capacity of this CPU.
 		 */
-		curr->cap = capacity_of(cpu);
+		curr->cap = max_t(unsigned long, capacity_of(cpu), 1);
+		curr->cap_orig = capacity_orig_of(cpu);
 
 		/* Calculate the relative utilization for this CPU candidate */
-		curr->util = curr->util * SCHED_CAPACITY_SCALE / curr->cap;
+		curr->util = curr->raw_util * SCHED_CAPACITY_SCALE / curr->cap;
 
 		/*
 		 * Check if this CPU is better than the best CPU found so far.
@@ -179,8 +216,8 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 		 * cidx still needs to be changed to the other candidate slot.
 		 */
 		if (best == curr ||
-		    cass_cpu_better(curr, best, p_util, this_cpu, prev_cpu,
-				    sync)) {
+		    cass_cpu_better(curr, best, this_cpu, prev_cpu,
+				    sync, boosted)) {
 			best = curr;
 			cidx ^= 1;
 		}
@@ -195,9 +232,14 @@ static int cass_select_task_rq_fair(struct task_struct *p, int prev_cpu,
 				    int sibling_count_hint)
 {
 	bool sync;
+	bool boosted = schedtune_prefer_idle(p) > 0 ||
+		       schedtune_task_boost(p) > 0;
 
-	/* Don't balance on exec since we don't know what @p will look like */
-	if (sd_flag & SD_BALANCE_EXEC)
+	/*
+	 * Don't balance unboosted tasks on exec since their load is unknown,
+	 * but allow boosted top-app tasks to spread onto idle big CPUs.
+	 */
+	if ((sd_flag & SD_BALANCE_EXEC) && !boosted)
 		return prev_cpu;
 
 	/*
@@ -213,5 +255,5 @@ static int cass_select_task_rq_fair(struct task_struct *p, int prev_cpu,
 		sync_entity_load_avg(&p->se);
 
 	sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
-	return cass_best_cpu(p, prev_cpu, sync);
+	return cass_best_cpu(p, prev_cpu, sync, boosted);
 }
