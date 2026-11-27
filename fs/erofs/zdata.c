@@ -6,6 +6,7 @@
 #include "zdata.h"
 #include "compress.h"
 #include <linux/prefetch.h>
+#include <linux/sched/mm.h>
 #include <linux/overflow.h>
 #include <linux/cpuhotplug.h>
 #include <trace/events/erofs.h>
@@ -908,6 +909,7 @@ static void z_erofs_decompress_kickoff(struct z_erofs_decompressqueue *io,
 				       bool sync, int bios)
 {
 	struct erofs_sb_info *const sbi = EROFS_SB(io->sb);
+	unsigned int noio_flags;
 
 	/* wake up the caller thread for sync decompression */
 	if (sync) {
@@ -940,7 +942,10 @@ static void z_erofs_decompress_kickoff(struct z_erofs_decompressqueue *io,
 		sbi->readahead_sync_decompress = true;
 		return;
 	}
+	/* Inline bio completion may run inside an active I/O submission. */
+	noio_flags = memalloc_noio_save();
 	z_erofs_decompressqueue_work(&io->u.work);
+	memalloc_noio_restore(noio_flags);
 }
 
 static bool z_erofs_page_is_invalidated(struct page *page)
