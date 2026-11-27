@@ -88,8 +88,12 @@ arch/*/include/generated
 patches-*
 
 # quilt's files
-patches
+/patches
 series
+# ...except our own pinned ksun patches, which the build script applies
+!/patches/
+!/patches/ksun/
+!/patches/ksun/*.patch
 
 # cscope files
 cscope.*

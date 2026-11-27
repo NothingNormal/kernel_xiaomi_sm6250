@@ -47,6 +47,9 @@
 
 #include <linux/compat.h>
 #include <linux/syscalls.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#endif
 #include <linux/kprobes.h>
 #include <linux/user_namespace.h>
 #include <linux/binfmts.h>
@@ -192,6 +195,16 @@ out:
 	return error;
 }
 
+#ifdef CONFIG_KSU_SUSFS
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+extern void susfs_spoof_uname(struct new_utsname *tmp);
+extern struct static_key_false susfs_is_uname_spoof_buffer_set;
+#endif // #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+extern bool susfs_is_priority_uid_filtered(uid_t uid);
+#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+#endif // #ifdef CONFIG_KSU_SUSFS
+
 SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 {
 	struct task_struct *g, *p;
@@ -237,6 +250,17 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 		if (!who)
 			uid = cred->uid;
 		else if (!uid_eq(uid, cred->uid)) {
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+			/*
+			 * - Hide the filtered apps from the app processes that
+			 *   abuse getpriority/setpriority to enumerate the
+			 *   installed uids. uid >= 10000 is the app range, so
+			 *   root and the system uids keep the stock behaviour.
+			 */
+			if (cred->uid.val >= 10000 &&
+			    susfs_is_priority_uid_filtered(uid.val))
+				goto out_unlock;
+#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
 			user = find_user(uid);
 			if (!user)
 				goto out_unlock;	/* No processes for this user */
@@ -305,6 +329,11 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 		if (!who)
 			uid = cred->uid;
 		else if (!uid_eq(uid, cred->uid)) {
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+			if (cred->uid.val >= 10000 &&
+			    susfs_is_priority_uid_filtered(uid.val))
+				goto out_unlock;
+#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
 			user = find_user(uid);
 			if (!user)
 				goto out_unlock;	/* No processes for this user */
@@ -1268,6 +1297,16 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 	}
 #endif
 	up_read(&uts_sem);
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+	/*
+	 * - Only touch the utsname once the userspace has actually pushed a
+	 *   value, the static branch keeps the untouched case free of any
+	 *   additional work. The spoof is applied after the vendor fake_uname
+	 *   workaround so that the SUSFS value always wins.
+	 */
+	if (static_branch_likely(&susfs_is_uname_spoof_buffer_set))
+		susfs_spoof_uname(&tmp);
+#endif // #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
 	if (copy_to_user(name, &tmp, sizeof(tmp)))
 		return -EFAULT;
 

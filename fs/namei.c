@@ -39,9 +39,23 @@
 #include <linux/bitops.h>
 #include <linux/init_task.h>
 #include <linux/uaccess.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+#include <linux/susfs_def.h>
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
 #include "internal.h"
 #include "mount.h"
+
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+extern __attribute__((hot)) bool susfs_is_inode_sus_path(struct inode *inode);
+/*
+ * - The fake name the suspect dentry is renamed to while it is handed to the
+ *   caller, so that a lookup of a hidden path resolves to a name that does not
+ *   exist on the filesystem. Kept unique on purpose, see susfs.c.
+ */
+extern const struct qstr susfs_fake_qstr_name;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/namei.h>
@@ -1630,6 +1644,17 @@ static struct dentry *lookup_dcache(const struct qstr *name,
 			dput(dentry);
 			return ERR_PTR(error);
 		}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+		/*
+		 * - A dentry that is flagged as a sus path must look like it is
+		 *   not cached, otherwise __lookup_hash() would hand it back
+		 *   without ever consulting the filesystem again.
+		 */
+		if (dentry->d_inode && susfs_is_inode_sus_path(dentry->d_inode)) {
+			dput(dentry);
+			return NULL;
+		}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	}
 	return dentry;
 }
@@ -1663,13 +1688,38 @@ static struct dentry *__lookup_hash(const struct qstr *name,
 		struct dentry *base, unsigned int flags)
 {
 	struct dentry *dentry = lookup_dcache(name, base, flags);
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	bool found_sus_path = false;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
 	if (dentry)
 		return dentry;
 
 	dentry = d_alloc(base, name);
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+retry:
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	if (unlikely(!dentry))
 		return ERR_PTR(-ENOMEM);
+
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	/*
+	 * - The resolved dentry belongs to a hidden path, drop it and retry the
+	 *   lookup with the fake name instead, so the caller gets a dentry that
+	 *   points to a non existing entry and never learns the real inode.
+	 * - Unhashed negative dentries are cheap, no extra reference is taken.
+	 */
+	if (dentry->d_inode && !found_sus_path &&
+	    susfs_is_inode_sus_path(dentry->d_inode)) {
+		if (d_in_lookup(dentry))
+			d_lookup_done(dentry);
+		if (!(flags & LOOKUP_RCU))
+			dput(dentry);
+		dentry = d_alloc(base, &susfs_fake_qstr_name);
+		found_sus_path = true;
+		goto retry;
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
 	return lookup_real(base->d_inode, dentry, flags);
 }
@@ -1769,6 +1819,9 @@ static struct dentry *lookup_slow(const struct qstr *name,
 	struct dentry *dentry = ERR_PTR(-ENOENT), *old;
 	struct inode *inode = dir->d_inode;
 	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	bool found_sus_path = false;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
 	inode_lock_shared(inode);
 	/* Don't go there if it's already dead */
@@ -1776,6 +1829,9 @@ static struct dentry *lookup_slow(const struct qstr *name,
 		goto out;
 again:
 	dentry = d_alloc_parallel(dir, name, &wq);
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+retry:
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	if (IS_ERR(dentry))
 		goto out;
 	if (unlikely(!d_in_lookup(dentry))) {
@@ -1799,6 +1855,22 @@ again:
 			dentry = old;
 		}
 	}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	/*
+	 * - The entry resolved to a hidden path, retry the parallel lookup with
+	 *   the fake name so that the caller ends up with a dentry that is
+	 *   negative and that cannot be used to reach the real inode.
+	 */
+	if (!found_sus_path && !IS_ERR(dentry) && dentry &&
+	    dentry->d_inode && susfs_is_inode_sus_path(dentry->d_inode)) {
+		if (d_in_lookup(dentry))
+			d_lookup_done(dentry);
+		dput(dentry);
+		dentry = d_alloc_parallel(dir, &susfs_fake_qstr_name, &wq);
+		found_sus_path = true;
+		goto retry;
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 out:
 	inode_unlock_shared(inode);
 	return dentry;
@@ -2275,6 +2347,16 @@ OK:
 				continue;
 			}
 		}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+		/*
+		 * - No need to dput() here, nd->path still owns the reference.
+		 * - Return -ENOENT for a sub path of a hidden path, walking into it
+		 *   must look exactly like walking into an entry that is gone.
+		 */
+		if (nd->path.dentry->d_inode &&
+		    susfs_is_inode_sus_path(nd->path.dentry->d_inode))
+			return -ENOENT;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 		if (unlikely(!d_can_lookup(nd->path.dentry))) {
 			if (nd->flags & LOOKUP_RCU) {
 				if (unlazy_walk(nd))

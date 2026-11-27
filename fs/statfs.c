@@ -50,6 +50,24 @@ static int calculate_f_flags(struct vfsmount *mnt)
 		flags_by_sb(mnt->mnt_sb->s_flags);
 }
 
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+#include <linux/susfs_def.h>
+#include <linux/magic.h>
+extern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode,
+					    struct kstatfs *buf, bool *is_fuse);
+
+/* Exported to SUSFS, the static originals stay private to this file. */
+int calculate_f_flags_wrapper(struct vfsmount *mnt)
+{
+	return calculate_f_flags(mnt);
+}
+
+int statfs_by_dentry_wrapper(struct dentry *dentry, struct kstatfs *buf)
+{
+	return statfs_by_dentry(dentry, buf);
+}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+
 static int statfs_by_dentry(struct dentry *dentry, struct kstatfs *buf)
 {
 	int retval;
@@ -72,6 +90,22 @@ int vfs_statfs(const struct path *path, struct kstatfs *buf)
 	int error;
 
 	error = statfs_by_dentry(path->dentry, buf);
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	/*
+	 * - A sus kstat entry reports the superblock values of the path it
+	 *   replaces, so that the statfs of a hidden mount cannot be told apart
+	 *   from the one of the stock mount.
+	 * - Only consulted for the inodes the userspace added, and the spoof is
+	 *   skipped when the kstat was not registered.
+	 */
+	if (!error && path->dentry->d_inode) {
+		bool is_fuse = path->dentry->d_sb->s_magic == FUSE_SUPER_MAGIC;
+
+		if (!susfs_sus_kstat_spoof_vfs_statfs(path->dentry->d_inode, buf,
+						      &is_fuse))
+			return 0;
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 	if (!error)
 		buf->f_flags = calculate_f_flags(path->mnt);
 	return error;

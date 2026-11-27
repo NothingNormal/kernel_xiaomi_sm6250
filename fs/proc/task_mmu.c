@@ -447,6 +447,10 @@ static int show_vma_header_prefix(struct seq_file *m, unsigned long start,
 	return 0;
 }
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+extern bool susfs_is_inode_sus_map(struct inode *inode);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+
 static void
 show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)
 {
@@ -461,10 +465,26 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)
 
 	if (file) {
 		struct inode *inode = file_inode(vma->vm_file);
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		/*
+		 * - A mapping of a file that is flagged as sus_map is reported as
+		 *   an anonymous mapping, so that the injected library cannot be
+		 *   found back through /proc/<pid>/[maps|smaps|...].
+		 * - Only the app processes see the rewritten entry, the su process
+		 *   keeps the real one for debugging.
+		 */
+		if (susfs_is_inode_sus_map(inode)) {
+			file = NULL;
+			goto out_skip_dev_ino;
+		}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 		dev = inode->i_sb->s_dev;
 		ino = inode->i_ino;
 		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
 	}
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+out_skip_dev_ino:
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 
 	start = vma->vm_start;
 	end = vma->vm_end;

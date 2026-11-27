@@ -98,6 +98,16 @@ void arch_setup_new_exec(void);
 #define TIF_TAGGED_ADDR		24	/* Allow tagged user addresses */
 #define TIF_MM_RELEASED		25
 
+/*
+ * SUSFS (CONFIG_KSU_SUSFS) keeps its per-task state in the thread flags.
+ * The numbers are taken from the SUSFS upstream v2.4.0 non-GKI layout so that
+ * the userspace side and the kernel side agree. They must not collide with the
+ * flags above; 26..31 are unused in this tree.
+ */
+#define TIF_PROC_UMOUNTED	27	/* proc is umounted, hide sus mounts from it */
+#define TIF_PROC_NO_SU		28	/* proc is known to never run su */
+#define TIF_PROC_UMOUNTED_FOR_ZYGOTE_NEXT 29
+
 #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
 #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
 #define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
