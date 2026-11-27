@@ -3,6 +3,12 @@
 #define _LINUX_MMZONE_H
 
 #ifndef __ASSEMBLY__
+
+/* Generation and reference-tier limits from Android Common 5.10. */
+#define MIN_NR_GENS		2U
+#define MAX_NR_GENS		4U
+#define MAX_NR_TIERS		4U
+
 #ifndef __GENERATING_BOUNDS_H
 
 #include <linux/spinlock.h>
